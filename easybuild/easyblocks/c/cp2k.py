@@ -134,6 +134,19 @@ def get_regtest_errors(output):
     return res.group(1).strip() if res else ''
 
 
+def do_regtest_py_cmd(script, arguments, python_cmd=None, env_prefix=''):
+    """Assemble the shell command that runs CP2K's tests/do_regtest.py.
+
+    The Makefile path (py_regtest_cmd, CP2K < 2026.1) and the CMake path
+    (regtest_cmd, CP2K >= 2026.1) both call this. arguments are shell tokens
+    placed after the script. python_cmd defaults to this interpreter; the
+    CMake path passes 'python3 -B' so a copied tests/ tree gains no __pycache__.
+    """
+    if python_cmd is None:
+        python_cmd = sys.executable
+    return env_prefix + ' '.join([python_cmd, script] + list(arguments))
+
+
 class EB_CP2K(CMakeMake):
     """
     Support for building CP2K
@@ -900,7 +913,7 @@ class EB_CP2K(CMakeMake):
         maxtasks = self.cfg['maxtasks']
         if maxtasks is None:
             maxtasks = MAKEFILE_REGTEST_MAXTASKS
-        cmd = [sys.executable, script, '--mpiranks', str(num_ranks), '--maxtasks', str(maxtasks)]
+        cmd = ['--mpiranks', str(num_ranks), '--maxtasks', str(maxtasks)]
         if self.cfg['omp_num_threads']:
             cmd.extend(['--ompthreads', str(self.cfg['omp_num_threads'])])
 
@@ -915,10 +928,9 @@ class EB_CP2K(CMakeMake):
         if placeholder in mpiexec:
             raise EasyBuildError("Failed to construct MPI launcher for the regression test from '%s'", mpiexec)
         cmd.extend(['--mpiexec', quote(mpiexec)])
-
         cmd.extend([quote(target), self.cfg['type']])
 
-        return ' '.join(cmd)
+        return do_regtest_py_cmd(script, cmd)
 
     def regtest_env_cmd(self):
         """Command that lets mpiexec start more MPI ranks than there are slots, as the regression tests may"""
@@ -948,7 +960,8 @@ class EB_CP2K(CMakeMake):
 
         # -B: no __pycache__ next to the driver, which may be copied into (or be part of) the installation
         driver = os.path.join(cp2k_root, 'tests', 'do_regtest.py')
-        return ' '.join([self.regtest_env_cmd() + 'python3 -B', driver] + regtest_opts + [bin_dir, ext])
+        return do_regtest_py_cmd(driver, regtest_opts + [bin_dir, ext], python_cmd='python3 -B',
+                                 env_prefix=self.regtest_env_cmd())
 
     def test_step_cmake(self):
         """Run CP2K's regression tests with the binaries in the build directory"""
