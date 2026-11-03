@@ -42,6 +42,28 @@ from easybuild.tools.run import run_shell_cmd
 from easybuild.tools.systemtools import get_shared_lib_ext
 
 
+def libint_fortran_cmake_flag(version):
+    """CMake option that turns on Libint's Fortran interface.
+
+    Libint 2.12 renamed ENABLE_FORTRAN to LIBINT2_ENABLE_FORTRAN in
+    export/cmake/CMakeLists.txt.export. The previous name is not read.
+    """
+    if LooseVersion(version) >= LooseVersion('2.12.0'):
+        return '-DLIBINT2_ENABLE_FORTRAN=ON'
+    return '-DENABLE_FORTRAN=ON'
+
+
+def libint_compiler_configure_cmd(preconfigopts, compiler_configopts):
+    """Shell command for the Libint compiler's autoconf ./configure.
+
+    configopts is reserved for the generated library's CMake. Autoconf rejects
+    those -D flags, for example:
+    configure: error: unrecognized option: '-DLIBINT2_ENABLE_FORTRAN=ON'
+    """
+    parts = [preconfigopts, './configure', compiler_configopts]
+    return ' '.join(part for part in parts if part)
+
+
 class EB_Libint(CMakeMake):
 
     @staticmethod
@@ -83,12 +105,7 @@ class EB_Libint(CMakeMake):
             # first run autogen.sh script to generate initial configure script
             run_shell_cmd("./autogen.sh")
 
-            cmd = ' '.join([
-                self.cfg['preconfigopts'],
-                './configure',
-                self.cfg['configopts'],
-                self.cfg['libint_compiler_configopts'],
-            ])
+            cmd = libint_compiler_configure_cmd(self.cfg['preconfigopts'], self.cfg['libint_compiler_configopts'])
             run_shell_cmd(cmd)
 
             print_msg("generating Libint library...")
@@ -134,7 +151,7 @@ class EB_Libint(CMakeMake):
 
         else:
             if self.cfg['with_fortran']:
-                self.cfg.update('configopts', '-DENABLE_FORTRAN=ON')
+                self.cfg.update('configopts', libint_fortran_cmake_flag(self.version))
 
             # also build shared libraries (not enabled by default)
             self.cfg.update('configopts', "-DLIBINT2_BUILD_SHARED_AND_STATIC_LIBS=ON")
