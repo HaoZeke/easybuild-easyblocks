@@ -42,6 +42,7 @@ import easybuild.tools.options as eboptions
 import easybuild.tools.tomllib as tomllib
 import easybuild.easyblocks.generic.pythonpackage as pythonpackage
 import easybuild.easyblocks.generic.cargo as cargo
+import easybuild.easyblocks.c.cp2k as cp2k
 import easybuild.easyblocks.l.lammps as lammps
 import easybuild.easyblocks.p.python as python
 import easybuild.easyblocks.p.pytorch as pytorch
@@ -752,6 +753,42 @@ class EasyBlockSpecificTest(TestCase):
         write_file(version_file, version_txt)
 
         self.assertEqual(lammps.translate_lammps_version('d3adb33f', path=self.tmpdir), '2025.04.02.3')
+
+    def test_cp2k_py_regtest_cmd(self):
+        """Test construction of the command for the Python regression test driver of CP2K."""
+        from types import SimpleNamespace
+
+        startdir = os.path.join(self.tmpdir, 'cp2k-2025.2')
+        mkdir(os.path.join(startdir, 'tests'), parents=True)
+
+        def mpi_cmd_for(cmd, nr_ranks):
+            return 'mpirun -n %s %s' % (nr_ranks, cmd)
+
+        eb = SimpleNamespace(
+            cfg={'start_dir': startdir, 'maxtasks': 4, 'omp_num_threads': 2, 'type': 'psmp'},
+            typearch='Linux-foss',
+            toolchain=SimpleNamespace(mpi_cmd_for=mpi_cmd_for),
+        )
+
+        # CP2K 2025.1 and later: executable directory and mpiexec template with {N}
+        script = os.path.join(startdir, 'tests', 'do_regtest.py')
+        write_file(script, 'add_argument("binary_dir")\nadd_argument("--mpiexec", default="mpiexec -n {N}")\n')
+        cmd = cp2k.EB_CP2K.py_regtest_cmd(eb, script, 4)
+        exe_dir = os.path.join(startdir, 'exe', 'Linux-foss')
+        expected = "%s %s --mpiranks 4 --maxtasks 4 --ompthreads 2 --mpiexec 'mpirun -n {N}' %s psmp" % (
+            sys.executable, script, exe_dir)
+        self.assertEqual(cmd, expected)
+
+        # CP2K 2024.1: arch as argument, driver adds '-n <ranks>' itself
+        write_file(script, 'parser.add_argument("arch")\nparser.add_argument("--mpiexec", default="mpiexec")\n')
+        cmd = cp2k.EB_CP2K.py_regtest_cmd(eb, script, 4)
+        expected = "%s %s --mpiranks 4 --maxtasks 4 --ompthreads 2 --mpiexec mpirun Linux-foss psmp" % (
+            sys.executable, script)
+        self.assertEqual(cmd, expected)
+
+        # without OpenMP threads configured
+        eb.cfg['omp_num_threads'] = None
+        self.assertNotIn('--ompthreads', cp2k.EB_CP2K.py_regtest_cmd(eb, script, 4))
 
     def test_pytorch_test_log_parsing(self):
         """Verify parsing of XML files produced by PyTorch tests."""
