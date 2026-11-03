@@ -35,20 +35,20 @@ import sys
 import tempfile
 import textwrap
 from pathlib import Path
-from unittest import TestLoader, TextTestRunner
+from unittest import TestLoader, TextTestRunner, mock
 from test.easyblocks.module import cleanup
 
 import easybuild.tools.options as eboptions
 import easybuild.tools.tomllib as tomllib
+import easybuild.easyblocks.c.cp2k as cp2k
 import easybuild.easyblocks.generic.pythonpackage as pythonpackage
 import easybuild.easyblocks.generic.cargo as cargo
-import easybuild.easyblocks.c.cp2k as cp2k
 import easybuild.easyblocks.l.lammps as lammps
 import easybuild.easyblocks.l.libint as libint
 import easybuild.easyblocks.p.python as python
 import easybuild.easyblocks.p.pytorch as pytorch
 from easybuild.base.testing import TestCase
-from easybuild.easyblocks.generic.cmakemake import det_cmake_version
+from easybuild.easyblocks.generic.cmakemake import CMakeMake, det_cmake_version
 from easybuild.easyblocks.generic.toolchain import Toolchain
 from easybuild.easyblocks.tensorflow import det_binutils_bin_path
 from easybuild.framework.easyblock import EasyBlock, get_easyblock_instance
@@ -61,6 +61,7 @@ from easybuild.tools.filetools import adjust_permissions, mkdir, move_file, remo
 from easybuild.tools.modules import modules_tool
 from easybuild.tools.options import set_tmpdir
 from easybuild.tools.run import RunShellCmdResult
+from easybuild.tools.systemtools import get_shared_lib_ext
 from easybuild.tools.toolchain.toolchain import RPATH_WRAPPERS_SUBDIR
 
 
@@ -790,6 +791,264 @@ class EasyBlockSpecificTest(TestCase):
         # without OpenMP threads configured
         eb.cfg['omp_num_threads'] = None
         self.assertNotIn('--ompthreads', cp2k.EB_CP2K.py_regtest_cmd(eb, script, 4))
+
+    def test_cp2k_helpers(self):
+        """Test helper functions of the CP2K easyblock"""
+        configopts = ' '.join([
+            '-DCP2K_USE_MPI=OFF',
+            '-DCP2K_USE_MPI_F08:BOOL=ON',
+            "-DCP2K_USE_LIBXC='YES'",
+            '-D CP2K_USE_ELPA=on',
+            '-DCP2K_USE_SPGLIB=ON -DCP2K_USE_SPGLIB=0',
+            '-DCMAKE_BUILD_TYPE="Debug"',
+            '-DCP2K_USE_VORI=',
+        ])
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_MPI'), 'OFF')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_MPI_F08'), 'ON')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_LIBXC'), 'YES')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_ELPA'), 'on')
+        # the last value wins, as for CMake
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_SPGLIB'), '0')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CMAKE_BUILD_TYPE'), 'Debug')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_VORI'), '')
+        self.assertEqual(cp2k.get_cmake_option(configopts, 'CP2K_USE_PLUMED'), None)
+        # only the complete option name matches
+        self.assertEqual(cp2k.get_cmake_option('-DXCP2K_USE_PLUMED=ON -DCP2K_USE_PLUMEDX=ON', 'CP2K_USE_PLUMED'), None)
+
+        for value in ['ON', 'on', 'Yes', 'TRUE', 'y', '1', '2', 'FlexiBLAS']:
+            self.assertTrue(cp2k.is_cmake_true(value), value)
+        for value in ['OFF', 'off', 'No', 'FALSE', 'n', '0', '', 'IGNORE', 'NOTFOUND', 'ELPA-NOTFOUND']:
+            self.assertFalse(cp2k.is_cmake_true(value), value)
+
+        # output in the format printed by tests/do_regtest.py
+        errors = '\n'.join([
+            'x' * 100,
+            '/tmp/regtesting/TEST-2026-11-03_10-00-00/QS/regtest-kp-hfx-ri/Si_kp_hfx.inp.out',
+            '(last lines of the output)',
+            '',
+            'Runtime failure with code 1.',
+        ])
+        output = '\n'.join([
+            "Launched 2 test directories and 2 worker...",
+            '',
+            '------------------------------- Errors ---------------------------------',
+            errors,
+            '',
+            '------------------------------- Timings --------------------------------',
+            'Plot: name="timings", title="Timing Distribution", ylabel="time [s]"',
+            '',
+            '------------------------------- Summary --------------------------------',
+            'Number of FAILED  tests 1',
+            'Number of WRONG   tests 1',
+            'Number of CORRECT tests 2',
+            'Total number of   tests 5',
+            '',
+            'Summary: correct: 2 / 5; wrong: 1; failed: 1; n/a: 1; 3min',
+            'Status: FAILED',
+            '',
+            '*************************** Testing ended ******************************',
+        ])
+        expected = {'failed': 1, 'wrong': 1, 'correct': 2, 'total': 5, 'na': 1, 'status': 'FAILED'}
+        self.assertEqual(cp2k.parse_regtest_summary(output), expected)
+        self.assertEqual(cp2k.get_regtest_errors(output), errors)
+
+        output = output.replace('Number of FAILED  tests 1', 'Number of FAILED  tests 0')
+        output = output.replace('Number of WRONG   tests 1', 'Number of WRONG   tests 0')
+        output = output.replace('Total number of   tests 5', 'Total number of   tests 2')
+        output = output.replace('Status: FAILED', 'Status: OK')
+        expected = {'failed': 0, 'wrong': 0, 'correct': 2, 'total': 2, 'na': 0, 'status': 'OK'}
+        self.assertEqual(cp2k.parse_regtest_summary(output), expected)
+
+        # no summary if the driver stopped before running tests
+        output = "\nNo test directories selected, check --restrictdir filter.\n"
+        self.assertEqual(cp2k.parse_regtest_summary(output), None)
+        self.assertEqual(cp2k.get_regtest_errors(output), '')
+
+    def test_cp2k_cmake(self):
+        """Test the support of the CP2K easyblock for building with CMake"""
+
+        def get_cp2k_instance(version, toolchain, deps):
+            # a new path for each easyconfig, since process_easyconfig caches parsed easyconfigs by path
+            ec_path = os.path.join(tempfile.mkdtemp(dir=self.tmpdir), 'CP2K-%s.eb' % version)
+            write_file(ec_path, '\n'.join([
+                "easyblock = 'EB_CP2K'",
+                "name = 'CP2K'",
+                "version = '%s'" % version,
+                "homepage = 'https://www.cp2k.org'",
+                "description = 'CP2K'",
+                "toolchain = %s" % toolchain,
+                "builddependencies = [('Python', '3.14.2')]",
+                "dependencies = %s" % deps,
+                "moduleclass = 'chem'",
+            ]))
+            # no easyconfig for the toolchain is available to determine its hierarchy, which prints warnings
+            self.mock_stderr(True)
+            self.mock_stdout(True)
+            inst = get_easyblock_instance(process_easyconfig(ec_path)[0])
+            self.mock_stderr(False)
+            self.mock_stdout(False)
+            # sets the parallelism (cfg.parallel), as done before running any step
+            inst.post_init()
+            return inst
+
+        self.assertFalse(get_cp2k_instance('2025.2', 'SYSTEM', []).cmake_build)
+
+        deps = [('DBCSR', '2.10.0'), ('ELPA', '2026.02.002'), ('Libint', '2.13.1', '-lmax-6-cp2k'),
+                ('libvori', '220621'), ('libxc', '7.0.0'), ('PLUMED', '2.10.0'), ('spglib', '2.7.0')]
+        cp2k_inst = get_cp2k_instance('2026.2', "{'name': 'foss', 'version': '2026.1'}", deps)
+        self.assertTrue(cp2k_inst.cmake_build)
+        self.assertEqual(cp2k_inst.build_type, 'Generic')
+
+        features = cp2k_inst.cmake_features()
+        expected_options = ['CP2K_USE_ELPA', 'CP2K_USE_FFTW3', 'CP2K_USE_LIBINT2', 'CP2K_USE_LIBXC', 'CP2K_USE_MPI',
+                            'CP2K_USE_MPI_F08', 'CP2K_USE_PLUMED', 'CP2K_USE_SPGLIB', 'CP2K_USE_VORI']
+        self.assertEqual(features['options'], dict.fromkeys(expected_options, 'ON'))
+        self.assertEqual(features['ext'], 'psmp')
+        expected_flags = ['omp', 'parallel', 'scalapack', 'mpi_f08', 'fftw3', 'elpa', 'libint', 'libxc', 'plumed2',
+                          'spglib', 'libvori', 'libbqb']
+        self.assertEqual(features['flags'], expected_flags)
+
+        with mock.patch.object(CMakeMake, 'configure_step') as cmake_configure_step:
+            cp2k_inst.cfg['configopts'] = '-DCP2K_USE_SPGLIB=OFF'
+            cp2k_inst.configure_step()
+        cmake_configure_step.assert_called_once()
+        configopts = cp2k_inst.cfg['configopts'].split()
+        self.assertIn('-DCP2K_BLAS_VENDOR=FlexiBLAS', configopts)
+        for option in expected_options:
+            if option != 'CP2K_USE_SPGLIB':
+                self.assertIn('-D%s=ON' % option, configopts)
+        # options in configopts take precedence
+        self.assertIn('-DCP2K_USE_SPGLIB=OFF', configopts)
+        self.assertNotIn('-DCP2K_USE_SPGLIB=ON', configopts)
+        self.assertNotIn('spglib', cp2k_inst.cmake_features()['flags'])
+
+        cp2k_inst.cfg['configopts'] = '-D CP2K_USE_MPI_F08:BOOL=NO -DCMAKE_BUILD_TYPE=Debug'
+        features = cp2k_inst.cmake_features()
+        self.assertEqual(features['ext'], 'pdbg')
+        self.assertNotIn('mpi_f08', features['flags'])
+        cp2k_inst.cfg['configopts'] = ''
+
+        cp2k_inst.cfg['plumed'] = False
+        features = cp2k_inst.cmake_features()
+        self.assertNotIn('CP2K_USE_PLUMED', features['options'])
+        self.assertNotIn('plumed2', features['flags'])
+
+        # oversubscription of the MPI ranks started by the test driver, for Open MPI 4.x and 5.x
+        regtest_cmd = 'python3 -B /src/tests/do_regtest.py --maxtasks %s --smoketest /inst/bin psmp'
+        regtest_cmd = regtest_cmd % cp2k_inst.cfg.parallel
+        os.environ.pop('EBVERSIONOPENMPI', None)
+        prte_env = 'export PRTE_MCA_rmaps_default_mapping_policy=:oversubscribe && '
+        self.assertEqual(cp2k_inst.regtest_cmd('/src', '/inst/bin', 'psmp', ['--smoketest']), prte_env + regtest_cmd)
+        os.environ['EBVERSIONOPENMPI'] = '4.1.6'
+        ompi_env = 'export OMPI_MCA_rmaps_base_oversubscribe=1 && '
+        self.assertEqual(cp2k_inst.regtest_cmd('/src', '/inst/bin', 'psmp', ['--smoketest']), ompi_env + regtest_cmd)
+        os.environ['EBVERSIONOPENMPI'] = '5.0.8'
+        cp2k_inst.cfg['maxtasks'] = 6
+        cp2k_inst.cfg['omp_num_threads'] = 3
+        regtest_cmd = 'python3 -B /src/tests/do_regtest.py --maxtasks 6 --ompthreads 3 /inst/bin psmp'
+        self.assertEqual(cp2k_inst.regtest_cmd('/src', '/inst/bin', 'psmp', []), prte_env + regtest_cmd)
+
+        with mock.patch.object(EasyBlock, 'sanity_check_step') as sanity_check_step:
+            cp2k_inst.sanity_check_step()
+        kwargs = sanity_check_step.call_args.kwargs
+        for path in ['bin/cp2k.psmp', 'bin/cp2k.popt', 'lib/libcp2k.%s' % get_shared_lib_ext(),
+                     'lib/cmake/cp2k/cp2kConfig.cmake', 'include/cp2k/libcp2k.h', 'share/cp2k/tests/do_regtest.py']:
+            self.assertIn(path, kwargs['custom_paths']['files'])
+        self.assertEqual(kwargs['custom_paths']['dirs'], ['share/cp2k/data', 'share/cp2k/src/grid/sample_tasks'])
+        commands = kwargs['custom_commands']
+        flag_cmd = "cp2k.psmp --version | grep 'cp2kflags:' | grep -w %s"
+        for flag in expected_flags:
+            if flag == 'plumed2':
+                self.assertNotIn(flag_cmd % flag, commands)
+            else:
+                self.assertIn(flag_cmd % flag, commands)
+        share_dir = os.path.join(cp2k_inst.installdir, 'share', 'cp2k')
+        regtest = commands[-1]
+        self.assertTrue(regtest.startswith('cp -R %s/tests %s/src . && chmod -R u+w tests src && ' %
+                                           (share_dir, share_dir)), regtest)
+        self.assertTrue(regtest.endswith('./tests/do_regtest.py --maxtasks 6 --ompthreads 3 --smoketest '
+                                         '--cp2kdatadir %s/data %s/bin psmp' % (share_dir, cp2k_inst.installdir)),
+                        regtest)
+        self.assertEqual(kwargs['extra_modules'], ['Python/3.14.2-foss-2026.1'])
+
+        cp2k_inst.cfg['sanity_regtest'] = False
+        cp2k_inst.cfg['configopts'] = '-DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_LIBDIR=lib64'
+        with mock.patch.object(EasyBlock, 'sanity_check_step') as sanity_check_step:
+            cp2k_inst.sanity_check_step()
+        kwargs = sanity_check_step.call_args.kwargs
+        self.assertIn('lib64/libcp2k.a', kwargs['custom_paths']['files'])
+        self.assertFalse(any('do_regtest.py' in cmd for cmd in kwargs['custom_commands']))
+        self.assertEqual(kwargs['extra_modules'], None)
+        cp2k_inst.cfg['configopts'] = ''
+
+        # test step: regression tests with the binaries in the build directory, judged by the driver's summary
+        cp2k_inst.cfg['start_dir'] = '/src/cp2k-2026.2'
+        cp2k_inst.cfg['pretestopts'] = 'ulimit -s unlimited && '
+        cp2k_inst.builddir = '/build'
+        cp2k_inst.separate_build_dir = '/build/easybuild_obj'
+        # the easyblock class is loaded as easybuild.easyblocks.cp2k, which is not the module imported above
+        cp2k_module = sys.modules[type(cp2k_inst).__module__]
+
+        def run_test_step(output, exit_code):
+            res = RunShellCmdResult(cmd='', exit_code=exit_code, output=output, stderr=None, work_dir='/build',
+                                    out_file=None, err_file=None, cmd_sh=None, thread_id=None, task_id=None)
+            with mock.patch.object(cp2k_module, 'run_shell_cmd', return_value=res) as run_shell_cmd:
+                self.mock_stderr(True)
+                try:
+                    cp2k_inst.test_step()
+                finally:
+                    stderr = self.get_stderr()
+                    self.mock_stderr(False)
+            return run_shell_cmd.call_args.args[0], stderr
+
+        summary = '\n'.join(['Number of FAILED  tests %d', 'Number of WRONG   tests %d',
+                             'Number of CORRECT tests %d', 'Total number of   tests %d', 'Status: %s'])
+        cmd, stderr = run_test_step(summary % (0, 0, 2, 2, 'OK'), 0)
+        self.assertEqual(cmd, 'ulimit -s unlimited &&  ' + prte_env + 'python3 -B /src/cp2k-2026.2/tests/do_regtest.py '
+                         '--maxtasks 6 --ompthreads 3 --workbasedir /build/regtesting '
+                         '--cp2kdatadir /src/cp2k-2026.2/data /build/easybuild_obj/bin psmp')
+        self.assertEqual(stderr, '')
+
+        failed = summary % (1, 1, 2, 5, 'FAILED')
+        error_regex = "CP2K regression tests: 2 of 5 correct, 1 wrong, 1 failed, 1 without result"
+        self.assertRaisesRegex(EasyBuildError, error_regex, run_test_step, failed, 1)
+        self.assertRaisesRegex(EasyBuildError, r"No summary .* \(exit code 1\)", run_test_step, '', 1)
+
+        cp2k_inst.cfg['ignore_regtest_fails'] = True
+        stderr = run_test_step(failed, 1)[1]
+        self.assertIn(error_regex + '; ignoring this, as requested', stderr)
+        cp2k_inst.cfg['ignore_regtest_fails'] = False
+
+        # failures are reported as test failures, which --ignore-test-failure turns into a warning
+        orig_ignore_test_failure = config.update_build_option('ignore_test_failure', True)
+        try:
+            stderr = run_test_step(failed, 1)[1]
+        finally:
+            config.update_build_option('ignore_test_failure', orig_ignore_test_failure)
+        self.assertIn('Test failure ignored: ' + error_regex, stderr)
+
+        cp2k_inst.cfg['runtest'] = False
+        with mock.patch.object(cp2k_module, 'run_shell_cmd') as run_shell_cmd:
+            cp2k_inst.test_step()
+        run_shell_cmd.assert_not_called()
+
+        # without MPI
+        cp2k_inst = get_cp2k_instance('2026.2', 'SYSTEM', [('libxc', '7.0.0')])
+        features = cp2k_inst.cmake_features()
+        self.assertEqual(features['options'], {'CP2K_USE_LIBXC': 'ON'})
+        self.assertEqual((features['ext'], features['flags']), ('ssmp', ['omp', 'libxc']))
+        cp2k_inst.cfg['configopts'] = '-DCP2K_USE_MPI_F08=ON'
+        self.assertNotIn('mpi_f08', cp2k_inst.cmake_features()['flags'])
+        cp2k_inst.cfg['configopts'] = '-DCP2K_USE_ELPA=ON'
+        self.assertRaisesRegex(EasyBuildError, "only supports CP2K_USE_ELPA with MPI", cp2k_inst.cmake_features)
+        cp2k_inst.cfg['configopts'] = ''
+        cp2k_inst.cfg['plumed'] = True
+        self.assertRaisesRegex(EasyBuildError, "PLUMED is not a dependency", cp2k_inst.cmake_features)
+
+        cp2k_inst = get_cp2k_instance('2026.2', 'SYSTEM', [('CUDA', '13.0.1')])
+        self.assertRaisesRegex(EasyBuildError, "GPU support is not enabled", cp2k_inst.cmake_features)
+        cp2k_inst.cfg['configopts'] = '-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=H100'
+        self.assertEqual(cp2k_inst.cmake_features()['ext'], 'ssmp')
 
     def test_pytorch_test_log_parsing(self):
         """Verify parsing of XML files produced by PyTorch tests."""
