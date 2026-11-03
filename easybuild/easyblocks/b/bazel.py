@@ -39,6 +39,30 @@ from easybuild.tools.run import run_shell_cmd
 from easybuild.framework.easyconfig import CUSTOM
 
 
+def gcc_binutils_b_prefix():
+    """Return a gcc -B prefix for the assembler currently on PATH.
+
+    Bazel compile actions reset PATH to /bin:/usr/bin before invoking gcc.
+    GCC 15 emits ``.base64``, which the system assembler then rejects with
+    ``Error: unknown pseudo-op: `.base64'``. The prefix is the directory of
+    ``as`` as seen while the toolchain is loaded, with a trailing slash so
+    gcc treats it as a program prefix.
+    """
+    as_bin = which('as')
+    if not as_bin:
+        return None
+    return '-B%s/' % os.path.dirname(as_bin)
+
+
+def bazel_binutils_args():
+    """Bazel copt/linkopt flags that point gcc at the toolchain assembler."""
+    b_prefix = gcc_binutils_b_prefix()
+    if not b_prefix:
+        return ''
+    flags = ('copt', 'host_copt', 'linkopt', 'host_linkopt')
+    return ' '.join('--%s=%s' % (flag, b_prefix) for flag in flags)
+
+
 class EB_Bazel(EasyBlock):
     """Support for building/installing Bazel."""
 
@@ -159,6 +183,14 @@ class EB_Bazel(EasyBlock):
 
         # enable building in parallel
         bazel_args = f'--jobs={self.cfg.parallel}'
+
+        # GCC 15 emits the .base64 assembler directive. Bazel compile actions
+        # reset PATH to /bin:/usr/bin, so gcc then runs the system assembler:
+        #   Error: unknown pseudo-op: `.base64'
+        # -B<dir> makes gcc use the assembler that is on PATH with the toolchain loaded.
+        binutils_args = bazel_binutils_args()
+        if binutils_args:
+            bazel_args += ' ' + binutils_args
 
         # Bazel provides a JDK by itself for some architectures
         # We want to enforce it using the JDK we provided via modules

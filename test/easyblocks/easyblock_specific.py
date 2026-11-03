@@ -48,6 +48,7 @@ import easybuild.easyblocks.p.pytorch as pytorch
 from easybuild.base.testing import TestCase
 from easybuild.easyblocks.generic.cmakemake import det_cmake_version
 from easybuild.easyblocks.generic.toolchain import Toolchain
+from easybuild.easyblocks.b.bazel import bazel_binutils_args
 from easybuild.easyblocks.tensorflow import det_binutils_bin_path
 from easybuild.framework.easyblock import EasyBlock, get_easyblock_instance
 from easybuild.framework.easyconfig.easyconfig import process_easyconfig
@@ -672,6 +673,26 @@ class EasyBlockSpecificTest(TestCase):
         self.assertEqual(sorted(os.listdir(lib64_path)), ['site-packages'])
         self.assertTrue(os.path.isdir(lib64_site_path))
         self.assertFalse(os.path.islink(lib64_site_path))
+
+    def test_bazel_gcc_binutils_b_prefix(self):
+        """gcc -B prefix follows the assembler on PATH."""
+        fake_bin = os.path.join(self.tmpdir, 'fake_as_bin')
+        mkdir(fake_bin, parents=True)
+        fake_as = os.path.join(fake_bin, 'as')
+        write_file(fake_as, '#!/bin/sh\n')
+        adjust_permissions(fake_as, stat.S_IXUSR)
+        old_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = fake_bin + os.pathsep + old_path
+        try:
+            prefix = '-B%s/' % fake_bin
+            self.assertEqual(bazel_binutils_args().split(), [
+                '--copt=%s' % prefix,
+                '--host_copt=%s' % prefix,
+                '--linkopt=%s' % prefix,
+                '--host_linkopt=%s' % prefix,
+            ])
+        finally:
+            os.environ['PATH'] = old_path
 
     def test_det_binutils_bin_path(self):
         """Test det_binutils_bin_path provided by TensorFlow easyblock."""
