@@ -44,6 +44,7 @@ import easybuild.easyblocks.generic.pythonpackage as pythonpackage
 import easybuild.easyblocks.generic.cargo as cargo
 import easybuild.easyblocks.c.cp2k as cp2k
 import easybuild.easyblocks.l.lammps as lammps
+import easybuild.easyblocks.l.libint as libint
 import easybuild.easyblocks.p.python as python
 import easybuild.easyblocks.p.pytorch as pytorch
 from easybuild.base.testing import TestCase
@@ -956,6 +957,19 @@ class EasyBlockSpecificTest(TestCase):
                                pytorch.get_test_results, error_log_dir / 'consistency')
         self.assertRaisesRegex(ValueError, "Duplicate test",
                                pytorch.get_test_results, error_log_dir / 'duplicate')
+
+
+    def test_libint_compiler_configure_skips_cmake_flags(self):
+        """Autoconf ./configure must not receive CMake -D options from configopts."""
+        cmd = libint.libint_compiler_configure_cmd('', '--enable-eri=1 --with-max-am=6')
+        self.assertEqual(cmd, './configure --enable-eri=1 --with-max-am=6')
+        self.assertNotIn('-DLIBINT2_ENABLE_FORTRAN=ON', cmd)
+
+        cmd = libint.libint_compiler_configure_cmd('export FOO=1 &&', '--disable-unrolling')
+        self.assertEqual(cmd, 'export FOO=1 && ./configure --disable-unrolling')
+
+        self.assertEqual(libint.libint_fortran_cmake_flag('2.11.2'), '-DENABLE_FORTRAN=ON')
+        self.assertEqual(libint.libint_fortran_cmake_flag('2.12.0'), '-DLIBINT2_ENABLE_FORTRAN=ON')
 
 
 def suite(loader):
