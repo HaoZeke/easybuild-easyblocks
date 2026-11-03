@@ -244,6 +244,10 @@ class EB_Bazel(EasyBlock):
                 '--subcommands', '--verbose_failures',
                 # Just build tests
                 '--build_tests_only',
+                # Same assembler prefix as the build. Test actions use the
+                # linux sandbox and otherwise hit:
+                #   Error: unknown pseudo-op: `.base64'
+                bazel_binutils_args(),
                 self.cfg['testopts']
             ])
             run_shell_cmd(cmd)
