@@ -42,6 +42,7 @@ import glob
 import re
 import os
 import sys
+from shlex import quote
 from easybuild.tools import LooseVersion
 
 import easybuild.tools.toolchain as toolchain
@@ -698,6 +699,38 @@ class EB_CP2K(EasyBlock):
         if self.cfg['library']:
             run_shell_cmd(cmd + 'libcp2k')
 
+    def py_regtest_cmd(self, script, num_ranks):
+        """Construct command to run the Python regression test driver of CP2K (do_regtest.py)."""
+
+        with open(script, 'r', encoding='utf-8', errors='replace') as fh:
+            script_txt = fh.read()
+
+        # CP2K 2025.1 and later take the directory with the executables, earlier versions take the arch
+        if 'binary_dir' in script_txt:
+            target = os.path.join(self.cfg['start_dir'], 'exe', self.typearch)
+        else:
+            target = self.typearch
+
+        cmd = [sys.executable, script, '--mpiranks', str(num_ranks), '--maxtasks', str(self.cfg['maxtasks'])]
+        if self.cfg['omp_num_threads']:
+            cmd.extend(['--ompthreads', str(self.cfg['omp_num_threads'])])
+
+        # --mpiexec is a template with {N} for the number of ranks since CP2K 2024.2, earlier versions
+        # append '-n <ranks>' themselves
+        placeholder = '@RANKS@'
+        mpiexec = self.toolchain.mpi_cmd_for('', placeholder).strip()
+        if '{N}' in script_txt:
+            mpiexec = mpiexec.replace(placeholder, '{N}')
+        else:
+            mpiexec = re.sub(r'\s+(-n|-np|--np)\s+' + placeholder, '', mpiexec)
+        if placeholder in mpiexec:
+            raise EasyBuildError("Failed to construct MPI launcher for the regression test from '%s'", mpiexec)
+        cmd.extend(['--mpiexec', quote(mpiexec)])
+
+        cmd.extend([quote(target), self.cfg['type']])
+
+        return ' '.join(cmd)
+
     def test_step(self):
         """Run regression test."""
 
@@ -729,21 +762,32 @@ class EB_CP2K(EasyBlock):
             # location of do_regtest script
             cfg_fn = 'cp2k_regtest.cfg'
 
+            # CP2K 2023.2 and later ship a Python driver (tools/regtesting/do_regtest.py, moved to
+            # tests/do_regtest.py in CP2K 2024.1) instead of the shell script do_regtest
+            py_regtest_script = None
             regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'regtesting', 'do_regtest')
             regtest_cmd = [regtest_script, '-nobuild', '-config', cfg_fn]
             if LooseVersion(self.version) < LooseVersion('7.1'):
                 # -nosvn option was removed in CP2K 7.1
                 regtest_cmd.insert(1, '-nosvn')
 
-            # older version of CP2K
             if not os.path.exists(regtest_script):
-                regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'do_regtest')
-                regtest_cmd = [regtest_script, '-nocvs', '-quick', '-nocompile', '-config', cfg_fn]
+                # older version of CP2K
+                old_regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'do_regtest')
+                if os.path.exists(old_regtest_script):
+                    regtest_script = old_regtest_script
+                    regtest_cmd = [regtest_script, '-nocvs', '-quick', '-nocompile', '-config', cfg_fn]
+                else:
+                    for subdir in (('tests',), ('tools', 'regtesting')):
+                        candidate = os.path.join(self.cfg['start_dir'], *(subdir + ('do_regtest.py',)))
+                        if os.path.exists(candidate):
+                            py_regtest_script = candidate
+                            break
 
-            regtest_cmd = ' '.join(regtest_cmd)
-
-            # patch do_regtest so that reference output is used
-            if regtest_refdir:
+            # patch do_regtest so that reference output is used (shell script only)
+            if py_regtest_script:
+                self.log.info("Using Python regression test driver %s", py_regtest_script)
+            elif regtest_refdir:
                 self.log.info("Using reference output available in %s" % regtest_refdir)
                 try:
                     for line in fileinput.input(regtest_script, inplace=1, backup='.orig.refout'):
@@ -762,35 +806,44 @@ class EB_CP2K(EasyBlock):
             else:
                 self.log.info("Using %s cores for the MPI tests" % test_core_cnt)
 
-            # configure regression test
-            cfg_txt = '\n'.join([
-                'FORT_C_NAME="%(f90)s"',
-                'dir_base=%(base)s',
-                'cp2k_version=%(cp2k_version)s',
-                'dir_triplet=%(triplet)s',
-                'export ARCH=${dir_triplet}',
-                'cp2k_dir=%(cp2k_dir)s',
-                'leakcheck="YES"',
-                'maxtasks=%(maxtasks)s',
-                'cp2k_run_prefix="%(mpicmd_prefix)s"',
-            ]) % {
-                'f90': os.getenv('F90'),
-                'base': os.path.dirname(os.path.normpath(self.cfg['start_dir'])),
-                'cp2k_version': self.cfg['type'],
-                'triplet': self.typearch,
-                'cp2k_dir': os.path.basename(os.path.normpath(self.cfg['start_dir'])),
-                'maxtasks': self.cfg['maxtasks'],
-                'mpicmd_prefix': self.toolchain.mpi_cmd_for('', test_core_cnt),
-            }
+            if py_regtest_script:
+                regtest_cmd = self.py_regtest_cmd(py_regtest_script, test_core_cnt)
+                self.log.debug("Command to run regression test: %s", regtest_cmd)
+            else:
+                # configure regression test
+                cfg_txt = '\n'.join([
+                    'FORT_C_NAME="%(f90)s"',
+                    'dir_base=%(base)s',
+                    'cp2k_version=%(cp2k_version)s',
+                    'dir_triplet=%(triplet)s',
+                    'export ARCH=${dir_triplet}',
+                    'cp2k_dir=%(cp2k_dir)s',
+                    'leakcheck="YES"',
+                    'maxtasks=%(maxtasks)s',
+                    'cp2k_run_prefix="%(mpicmd_prefix)s"',
+                ]) % {
+                    'f90': os.getenv('F90'),
+                    'base': os.path.dirname(os.path.normpath(self.cfg['start_dir'])),
+                    'cp2k_version': self.cfg['type'],
+                    'triplet': self.typearch,
+                    'cp2k_dir': os.path.basename(os.path.normpath(self.cfg['start_dir'])),
+                    'maxtasks': self.cfg['maxtasks'],
+                    'mpicmd_prefix': self.toolchain.mpi_cmd_for('', test_core_cnt),
+                }
 
-            write_file(cfg_fn, cfg_txt)
-            self.log.debug("Contents of %s: %s" % (cfg_fn, cfg_txt))
+                write_file(cfg_fn, cfg_txt)
+                self.log.debug("Contents of %s: %s" % (cfg_fn, cfg_txt))
+                regtest_cmd = ' '.join(regtest_cmd)
 
             # run regression test
             regtest = run_shell_cmd(regtest_cmd, fail_on_error=False)
 
             if regtest.exit_code == 0:
                 self.log.info("Regression test output:\n%s" % regtest.output)
+            elif py_regtest_script and re.search(r"number\s+of\s+failed\s+tests\s+[0-9]+", regtest.output, re.I):
+                # the Python driver exits with a non-zero code if any test did not pass (including tests that
+                # are not applicable), the summary is evaluated below to decide if that is an error
+                self.log.info("Regression test exited with code %s, output:\n%s", regtest.exit_code, regtest.output)
             else:
                 raise EasyBuildError("Regression test failed (non-zero exit code): %s", regtest.output)
 
