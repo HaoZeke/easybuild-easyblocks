@@ -830,6 +830,14 @@ class EasyBlockSpecificTest(TestCase):
         with patch.object(seissol, 'build_option', return_value=None):
             self.assertEqual(resolve(block), ('cuda', 'sm_80'))
 
+    def test_seissol_cpu_ignores_global_cuda_target(self):
+        """A CUDA target shared by a build list does not select a CPU recipe's backend."""
+        block = type('Settings', (), {})()
+        block.cfg = {'device_backend': 'none', 'device_arch': 'auto',
+                     'cuda_compute_capabilities': None}
+        with patch.object(seissol, 'build_option', return_value=['9.0']):
+            self.assertEqual(seissol.EB_SeisSol._resolve_device(block), ('none', 'none'))
+
     def test_pytorch_test_log_parsing(self):
         """Verify parsing of XML files produced by PyTorch tests."""
         TestState = pytorch.TestState
