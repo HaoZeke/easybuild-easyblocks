@@ -213,7 +213,8 @@ class EB_SeisSol(CMakeMake):
         """Resolve DEVICE_BACKEND and DEVICE_ARCH."""
         backend = self.cfg['device_backend']
         arch = self.cfg['device_arch']
-        mapped = device_arch_from_cuda_cc(self.cfg['cuda_compute_capabilities'])
+        cuda_cc = build_option('cuda_compute_capabilities') or self.cfg['cuda_compute_capabilities']
+        mapped = device_arch_from_cuda_cc(cuda_cc)
         if arch == 'auto':
             arch = mapped or 'none'
         elif mapped and mapped != arch:
