@@ -1250,6 +1250,50 @@ class EasyBlockSpecificTest(TestCase):
         self.assertFalse(features['enabled']['CP2K_USE_TBLITE'])
         self.assertNotIn('tblite', features['flags'])
 
+    def test_cp2k_cmake_tblite_dispersion_flags(self):
+        """The sanity check requires every cp2kflag that CP2K_USE_TBLITE adds and tests/TEST_DIRS selects on."""
+
+        def tblite_sanity_commands(version, configopts=''):
+            ec_path = os.path.join(tempfile.mkdtemp(dir=self.tmpdir), 'CP2K-%s.eb' % version)
+            write_file(ec_path, '\n'.join([
+                "easyblock = 'EB_CP2K'",
+                "name = 'CP2K'",
+                "version = '%s'" % version,
+                "homepage = 'https://www.cp2k.org'",
+                "description = 'CP2K'",
+                "toolchain = SYSTEM",
+                "builddependencies = [('Python', '3.14.2')]",
+                "dependencies = [('tblite', '0.6.0', '-cp2k')]",
+                "configopts = '%s'" % configopts,
+                "moduleclass = 'chem'",
+            ]))
+            self.mock_stderr(True)
+            self.mock_stdout(True)
+            inst = get_easyblock_instance(process_easyconfig(ec_path)[0])
+            self.mock_stderr(False)
+            self.mock_stdout(False)
+            inst.post_init()
+            with mock.patch.object(EasyBlock, 'sanity_check_step') as sanity_check_step:
+                inst.sanity_check_step()
+            return sanity_check_step.call_args.kwargs['custom_commands']
+
+        flag_cmd = "cp2k.ssmp --version | grep 'cp2kflags:' | grep -w %s"
+
+        # CP2K 2026.2: __TBLITE, __DFTD4 and __S_DFTD3
+        commands = tblite_sanity_commands('2026.2')
+        for flag in ['tblite', 'mctc-lib', 'libdftd4', 's_dftd3']:
+            self.assertIn(flag_cmd % flag, commands)
+
+        # CP2K 2026.1 defines __TBLITE and __DFTD4, but not __S_DFTD3
+        commands = tblite_sanity_commands('2026.1')
+        for flag in ['tblite', 'mctc-lib', 'libdftd4']:
+            self.assertIn(flag_cmd % flag, commands)
+        self.assertNotIn(flag_cmd % 's_dftd3', commands)
+
+        commands = tblite_sanity_commands('2026.2', configopts='-DCP2K_USE_TBLITE=OFF')
+        for flag in ['tblite', 'mctc-lib', 'libdftd4', 's_dftd3']:
+            self.assertNotIn(flag_cmd % flag, commands)
+
 
 def suite(loader):
     """Return all easyblock-specific tests."""

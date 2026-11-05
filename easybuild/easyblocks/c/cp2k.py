@@ -72,8 +72,11 @@ CMAKE_DEP_OPTIONS = {
     'libxc': ('CP2K_USE_LIBXC', ['libxc']),
     'PLUMED': ('CP2K_USE_PLUMED', ['plumed2']),
     'spglib': ('CP2K_USE_SPGLIB', ['spglib']),
-    'tblite': ('CP2K_USE_TBLITE', ['tblite']),
+    # CP2K_USE_TBLITE defines __DFTD4; tests/TEST_DIRS selects dispersion cases using these flags.
+    'tblite': ('CP2K_USE_TBLITE', ['libdftd4', 'mctc-lib', 'tblite']),
 }
+# CP2K 2026.2 and later define __S_DFTD3 with CP2K_USE_TBLITE for the s_dftd3 test directories.
+TBLITE_S_DFTD3_VERSION = '2026.2'
 # options of dependencies that CP2K only honours together with CP2K_USE_MPI (cmake_dependent_option in CMakeLists.txt)
 CMAKE_MPI_ONLY_OPTIONS = ['CP2K_USE_ELPA', 'CP2K_USE_PLUMED']
 
@@ -1283,8 +1286,10 @@ class EB_CP2K(CMakeMake):
         if alias:
             custom_paths['files'].append(os.path.join('bin', 'cp2k.%s' % alias))
 
-        custom_commands = ["cp2k.%s --version | grep 'cp2kflags:' | grep -w %s" % (ext, flag)
-                           for flag in features['flags']]
+        flags = features['flags']
+        if features['enabled']['CP2K_USE_TBLITE'] and LooseVersion(self.version) >= TBLITE_S_DFTD3_VERSION:
+            flags = flags + ['s_dftd3']
+        custom_commands = ["cp2k.%s --version | grep 'cp2kflags:' | grep -w %s" % (ext, flag) for flag in flags]
 
         extra_modules = None
         if not self.cfg['sanity_regtest']:
