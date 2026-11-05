@@ -72,6 +72,7 @@ CMAKE_DEP_OPTIONS = {
     'libxc': ('CP2K_USE_LIBXC', ['libxc']),
     'PLUMED': ('CP2K_USE_PLUMED', ['plumed2']),
     'spglib': ('CP2K_USE_SPGLIB', ['spglib']),
+    'tblite': ('CP2K_USE_TBLITE', ['tblite']),
 }
 # options of dependencies that CP2K only honours together with CP2K_USE_MPI (cmake_dependent_option in CMakeLists.txt)
 CMAKE_MPI_ONLY_OPTIONS = ['CP2K_USE_ELPA', 'CP2K_USE_PLUMED']

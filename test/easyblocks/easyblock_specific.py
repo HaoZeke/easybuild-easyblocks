@@ -1231,6 +1231,28 @@ class EasyBlockSpecificTest(TestCase):
         self.assertEqual(libint.libint_fortran_cmake_flag('2.12.0'), '-DLIBINT2_ENABLE_FORTRAN=ON')
 
 
+    def test_cp2k_cmake_tblite(self):
+        """A declared tblite dependency enables its feature without overriding configopts."""
+        from types import SimpleNamespace
+
+        class Config(dict):
+            def dependencies(self):
+                return [{'name': 'tblite'}]
+
+        cfg = Config(configopts='', plumed=False)
+        instance = SimpleNamespace(cfg=cfg, build_type='Generic',
+                                   toolchain=SimpleNamespace(mpi_family=lambda: None))
+        features = cp2k.EB_CP2K.cmake_features(instance)
+        self.assertEqual(features['options'], {'CP2K_USE_TBLITE': 'ON'})
+        self.assertTrue(features['enabled']['CP2K_USE_TBLITE'])
+        self.assertIn('tblite', features['flags'])
+
+        cfg['configopts'] = '-DCP2K_USE_TBLITE=OFF'
+        features = cp2k.EB_CP2K.cmake_features(instance)
+        self.assertFalse(features['enabled']['CP2K_USE_TBLITE'])
+        self.assertNotIn('tblite', features['flags'])
+
+
 def suite(loader):
     """Return all easyblock-specific tests."""
     return loader.loadTestsFromTestCase(EasyBlockSpecificTest)
