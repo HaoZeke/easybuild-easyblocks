@@ -1217,7 +1217,6 @@ class EasyBlockSpecificTest(TestCase):
         self.assertRaisesRegex(ValueError, "Duplicate test",
                                pytorch.get_test_results, error_log_dir / 'duplicate')
 
-
     def test_libint_compiler_configure_skips_cmake_flags(self):
         """Autoconf ./configure must not receive CMake -D options from configopts."""
         cmd = libint.libint_compiler_configure_cmd('', '--enable-eri=1 --with-max-am=6')
@@ -1229,7 +1228,6 @@ class EasyBlockSpecificTest(TestCase):
 
         self.assertEqual(libint.libint_fortran_cmake_flag('2.11.2'), '-DENABLE_FORTRAN=ON')
         self.assertEqual(libint.libint_fortran_cmake_flag('2.12.0'), '-DLIBINT2_ENABLE_FORTRAN=ON')
-
 
     def test_cp2k_cmake_tblite(self):
         """A declared tblite dependency enables its feature without overriding configopts."""
