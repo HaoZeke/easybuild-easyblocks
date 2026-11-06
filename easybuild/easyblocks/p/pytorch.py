@@ -90,6 +90,15 @@ else:
                                            ))
 
 
+def configure_pytorch_xml_reports(path, variable):
+    """Set the XML report condition on pristine or configured sources."""
+    original = r'IS(?:_IN)?_CI'
+    configured = r'os\.getenv\("' + re.escape(variable) + r'"\)'
+    pattern = rf'(default=_get_test_report_path\(\) if) (?:{original}|{configured}) else None'
+    apply_regex_substitutions(path, [(pattern, fr'\1 os.getenv("{variable}") else None')],
+                              backup=False, on_missing_match=ERROR)
+
+
 def find_failed_test_names(tests_out):
     """Find failed names of failed test cases in the output of the test step
 
@@ -412,10 +421,8 @@ class EB_PyTorch(PythonPackage):
             else:
                 # Replace the condition to enable the XML test reports to use our variable instead of $IS_CI/$IS_IN_CI
                 # The variable is used because the file gets installed and we shouldn't change the default behavior.
-                apply_regex_substitutions('torch/testing/_internal/common_utils.py',
-                                          [(r'(default=_get_test_report_path\(\) if) IS(_IN)?_CI else None',
-                                            fr'\1 os.getenv("{self.GENERATE_TEST_REPORT_VAR_NAME}") else None')],
-                                          backup=False, on_missing_match=ERROR)
+                configure_pytorch_xml_reports('torch/testing/_internal/common_utils.py',
+                                              self.GENERATE_TEST_REPORT_VAR_NAME)
                 if pytorch_version < '2.8.0':
                     if pytorch_version >= '2.1.0':
                         run_test_subs = [(r'if IS_CI:\n\s+# Add the option to generate XML test report.*',
