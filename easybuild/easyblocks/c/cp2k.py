@@ -151,6 +151,25 @@ def do_regtest_py_cmd(script, arguments, python_cmd=None, env_prefix=''):
     return env_prefix + ' '.join([python_cmd, script] + list(arguments))
 
 
+def makefile_hdf5_sirius_options(options, hdf5_root, sirius_root):
+    """Add HDF5 and SIRIUS support to the options of the Makefile build (CP2K < 2026.1).
+
+    CP2K's INSTALL.md: -D__HDF5 enables HDF5, a hard dependency of SIRIUS; -D__SIRIUS enables SIRIUS.
+    SIRIUS installs its Fortran module in include/sirius and links its own dependencies into libsirius.
+    """
+    if sirius_root and not hdf5_root:
+        raise EasyBuildError("SIRIUS support in CP2K requires HDF5, but HDF5 is not a dependency")
+    if hdf5_root:
+        options['DFLAGS'] += ' -D__HDF5'
+        options['FCFLAGSOPT'] += ' -I%s ' % os.path.join(hdf5_root, 'include')
+        options['LIBS'] += ' -lhdf5_fortran -lhdf5'
+    if sirius_root:
+        options['DFLAGS'] += ' -D__SIRIUS'
+        options['FCFLAGSOPT'] += ' -I%s ' % os.path.join(sirius_root, 'include', 'sirius')
+        options['LIBS'] += ' -lsirius'
+    return options
+
+
 class EB_CP2K(CMakeMake):
     """
     Support for building CP2K
@@ -427,6 +446,8 @@ class EB_CP2K(CMakeMake):
                 options['FCFLAGSOPT'] += ' -I%s ' % elpa_inc_dir
             else:
                 options['DFLAGS'] += ' -D__ELPA3'
+
+        options = makefile_hdf5_sirius_options(options, get_software_root('HDF5'), get_software_root('SIRIUS'))
 
         # CUDA
         cuda = get_software_root('CUDA')

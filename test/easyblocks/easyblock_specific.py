@@ -1294,6 +1294,26 @@ class EasyBlockSpecificTest(TestCase):
         for flag in ['tblite', 'mctc-lib', 'libdftd4', 's_dftd3']:
             self.assertNotIn(flag_cmd % flag, commands)
 
+    def test_cp2k_makefile_hdf5_sirius(self):
+        """The Makefile build of CP2K < 2026.1 enables HDF5 and SIRIUS when they are dependencies."""
+
+        def options():
+            return {'DFLAGS': ' -D__parallel', 'FCFLAGSOPT': '', 'LIBS': ''}
+
+        res = cp2k.makefile_hdf5_sirius_options(options(), '/hdf5', '/sirius')
+        self.assertEqual(res['DFLAGS'].split(), ['-D__parallel', '-D__HDF5', '-D__SIRIUS'])
+        self.assertEqual(res['FCFLAGSOPT'].split(), ['-I/hdf5/include', '-I/sirius/include/sirius'])
+        self.assertEqual(res['LIBS'].split(), ['-lhdf5_fortran', '-lhdf5', '-lsirius'])
+
+        res = cp2k.makefile_hdf5_sirius_options(options(), '/hdf5', None)
+        self.assertEqual(res['DFLAGS'].split(), ['-D__parallel', '-D__HDF5'])
+        self.assertEqual(res['LIBS'].split(), ['-lhdf5_fortran', '-lhdf5'])
+
+        self.assertEqual(cp2k.makefile_hdf5_sirius_options(options(), None, None), options())
+
+        self.assertRaisesRegex(EasyBuildError, "SIRIUS support in CP2K requires HDF5",
+                               cp2k.makefile_hdf5_sirius_options, options(), None, '/sirius')
+
 
 def suite(loader):
     """Return all easyblock-specific tests."""
