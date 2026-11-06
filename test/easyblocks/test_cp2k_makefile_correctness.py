@@ -70,7 +70,7 @@ class Cp2kMakefileCorrectness(unittest.TestCase):
             cmake_build=False, cfg=cfg, builddir=str(self.root), version='2025.2',
             log=Mock(), postmsg='', py_regtest_cmd=lambda *args: 'regtest-fixture',
         )
-        output = ('number of tests 100\nnumber of failed tests %d\n'
+        output = ('number of  tests 100\nnumber of failed tests %d\n'
                   'number of wrong tests %d\nnumber of correct tests %d\n') % (
                       failed, wrong, 100 - failed - wrong)
         with patch('easybuild.easyblocks.c.cp2k.setvar'):
