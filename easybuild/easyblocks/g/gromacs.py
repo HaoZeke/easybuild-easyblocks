@@ -309,6 +309,11 @@ class EB_GROMACS(CMakeMake):
             self.cfg.update('configopts', '-DGMX_HWLOC=ON')
             self.cfg.update('configopts', '-DHWLOC_DIR=%s' % get_software_root('hwloc'))
 
+        # Enable HDF5 support (added in v2026) if it's listed as dependency
+        if gromacs_version >= '2026' and get_software_root('HDF5'):
+            self.cfg.update('configopts', '-DGMX_USE_HDF5=ON')
+            self.cfg.update('configopts', '-DHDF5_ROOT=%s' % get_software_root('HDF5'))
+
         # Ensure that the GROMACS log files report how the code was patched
         # during the build, so that any problems are easier to diagnose.
         # The GMX_VERSION_STRING_OF_FORK feature is available since 2020.
