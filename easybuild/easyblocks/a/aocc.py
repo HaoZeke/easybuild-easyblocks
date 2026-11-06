@@ -34,6 +34,7 @@ Support for installing AOCC, implemented as an easyblock.
 import glob
 import os
 import re
+import shlex
 import stat
 import tempfile
 
@@ -42,6 +43,7 @@ from easybuild.tools import LooseVersion
 from easybuild.easyblocks.generic.packedbinary import PackedBinary
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.config import build_option
 from easybuild.tools.filetools import adjust_permissions, move_file, write_file
 from easybuild.tools.modules import get_software_root, get_software_version
 from easybuild.tools.run import run_shell_cmd
@@ -51,7 +53,7 @@ from easybuild.tools.systemtools import get_shared_lib_ext, get_cpu_architecture
 WRAPPER_TEMPLATE = """#!/bin/bash
 
 # Patch argv[0] to the actual compiler so that the correct driver is used internally
-(exec -a "$0" {compiler_name} --gcc-toolchain=$EBROOTGCCCORE "$@")
+(exec -a "$0" {compiler_name} {compiler_options} "$@")
 """
 
 AOCC_MINIMAL_CPP_EXAMPLE = """
@@ -121,12 +123,19 @@ class EB_AOCC(PackedBinary):
             return
 
         orig_compiler_tmpl = f"{os.path.join(self.installdir, 'bin')}/{{}}.orig"
+        compiler_options = '--gcc-toolchain=$EBROOTGCCCORE'
+        sysroot = build_option('sysroot')
+        if sysroot:
+            compiler_options += ' --sysroot=%s' % shlex.quote(sysroot)
 
         def create_wrapper(wrapper_comp):
             """Create for a particular compiler, with a particular name"""
             wrapper_f = os.path.join(self.installdir, 'bin', wrapper_comp)
             compiler_name = orig_compiler_tmpl.format(wrapper_comp)
-            write_file(wrapper_f, WRAPPER_TEMPLATE.format(compiler_name=compiler_name))
+            write_file(wrapper_f, WRAPPER_TEMPLATE.format(
+                compiler_name=compiler_name,
+                compiler_options=compiler_options,
+            ))
 
             perms = stat.S_IXUSR | stat.S_IRUSR | stat.S_IXGRP | stat.S_IRGRP | stat.S_IXOTH | stat.S_IROTH
             adjust_permissions(wrapper_f, perms)
@@ -152,6 +161,9 @@ class EB_AOCC(PackedBinary):
 
         bin_dir = os.path.join(self.installdir, 'bin')
         prefix_str = '--gcc-install-dir=%s' % self.gcc_prefix
+        sysroot = build_option('sysroot')
+        if sysroot:
+            prefix_str += '\n--sysroot=%s' % shlex.quote(sysroot)
         for comp in compilers_to_add_config_file:
             with open(os.path.join(bin_dir, '%s.cfg' % comp), 'w') as f:
                 f.write(prefix_str)
