@@ -378,6 +378,12 @@ class EB_PyTorch(PythonPackage):
         cmake_version = get_software_version('CMake')
         if cmake_root and not os.path.isfile(os.path.join(cmake_root, 'bin', 'cmake3')):
             if cmake_version and cmake_version.split('.')[0] != '3':
+                # PyTorch supports CMake 4 since 2.7 (pytorch/pytorch#150203). It runs the newest of `cmake` and
+                # `cmake3` found in $PATH, so a CMake 3 `cmake3` from the system cannot take precedence.
+                if LooseVersion(cmake_version) >= '4' and LooseVersion(self.version) >= '2.7':
+                    self.log.info("Using CMake %s for PyTorch %s, no cmake3 alias required",
+                                  cmake_version, self.version)
+                    return
                 raise EasyBuildError('PyTorch requires CMake 3 but CMake %s was found', cmake_version)
             cmake_bin_dir = tempfile.mkdtemp(suffix='cmake-bin')
             self.log.warning('Creating symlink `cmake3` in %s to avoid PyTorch picking up a system CMake. ' +
