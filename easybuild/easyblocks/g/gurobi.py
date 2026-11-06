@@ -31,12 +31,14 @@ EasyBuild support for installing Gurobi, implemented as an easyblock
 @author: Sven Hansen (RWTH Aachen University)
 """
 import os
+import shlex
 
 from easybuild.easyblocks.generic.tarball import Tarball
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.tools import LooseVersion
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.filetools import copy_file
+from easybuild.tools.config import build_option
+from easybuild.tools.filetools import copy_file, which
 from easybuild.tools.modules import get_software_root
 from easybuild.tools.run import run_shell_cmd
 
@@ -84,6 +86,53 @@ class EB_Gurobi(Tarball):
         run_shell_cmd("make", work_dir=libbuilddir)
         copy_file(os.path.join(libbuilddir, "libgurobi_c++.a"), os.path.join(self.installdir, "lib"))
         run_shell_cmd("make clean", work_dir=libbuilddir)
+
+    def post_processing_step(self):
+        """Keep shipped binaries runnable when the module omits LD_LIBRARY_PATH."""
+        super().post_processing_step()
+
+        if 'LD_LIBRARY_PATH' not in (build_option('filter_env_vars') or []):
+            return
+        if which('patchelf') is None:
+            raise EasyBuildError("patchelf is required when LD_LIBRARY_PATH is filtered")
+
+        additions = ['$ORIGIN/../lib', os.path.join(self.installdir, 'lib')]
+        for subdir in ('bin', 'lib', 'lib64', 'matlab'):
+            root = os.path.join(self.installdir, subdir)
+            for directory, _, filenames in os.walk(root):
+                for filename in filenames:
+                    path = os.path.join(directory, filename)
+                    if not os.path.islink(path) and os.path.isfile(path):
+                        self._append_permanent_lib_rpath(path, additions)
+
+    def _append_permanent_lib_rpath(self, path, additions):
+        """Record the install library directory without discarding vendor paths."""
+        with open(path, 'rb') as stream:
+            if stream.read(4) != b'\x7fELF':
+                return
+        quoted_path = shlex.quote(path)
+        info = run_shell_cmd("file -b %s" % quoted_path, hidden=True).output.lower()
+        if 'dynamically linked' not in info:
+            return
+
+        current = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+        original = [entry for entry in current.split(':') if entry]
+        entries = list(original)
+        for addition in additions:
+            if addition not in entries:
+                entries.append(addition)
+        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+        if entries == original and '(RPATH)' in dynamic:
+            return
+
+        run_shell_cmd("patchelf --force-rpath --set-rpath %s %s" %
+                      (shlex.quote(':'.join(entries)), quoted_path), hidden=True)
+        recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+        if recorded.split(':') != entries:
+            raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
+        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+        if '(RPATH)' not in dynamic:
+            raise EasyBuildError("DT_RPATH was not recorded for %s", path)
 
     def sanity_check_step(self):
         """Custom sanity check for Gurobi."""
