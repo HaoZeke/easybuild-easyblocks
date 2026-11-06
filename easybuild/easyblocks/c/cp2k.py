@@ -789,6 +789,14 @@ class EB_CP2K(CMakeMake):
             options['FCFLAGSOPT'] += ' -fallow-argument-mismatch'
             options['FCFLAGSOPT2'] += ' -fallow-argument-mismatch'
 
+        # GCC 15 loop vectorization corrupts integer packing on AVX2 and AVX-512 targets.
+        # The target-specific flag preserves optimization for the other objects.
+        compression_source = os.path.join(self.cfg['start_dir'], 'src', 'hfxbase',
+                                          'hfx_compression_core_methods.F')
+        if (LooseVersion('15.0') <= LooseVersion(gcc_version) < LooseVersion('16.0')
+                and os.path.exists(compression_source)):
+            self.make_instructions += 'hfx_compression_core_methods.o: FCFLAGS += -fno-tree-loop-vectorize\n'
+
         return options
 
     def configure_ACML(self, options):
@@ -1179,9 +1187,8 @@ class EB_CP2K(CMakeMake):
                 logmsg = "Regression test reported %s / %s %s tests"
                 logmsg_values = (cnt, tot_cnt, test_result.lower())
 
-                # failed tests indicate problem with installation
-                # wrong tests are only an issue when there are excessively many
-                if (test_result == "FAILED" and cnt > 0) or (test_result == "WRONG" and (cnt / tot_cnt) > 0.1):
+                # A numerically wrong result is an installation failure at any count.
+                if test_result in ("FAILED", "WRONG") and cnt > 0:
                     if self.cfg['ignore_regtest_fails']:
                         self.log.warning(logmsg, *logmsg_values)
                         self.log.info("Ignoring failures in regression test, as requested.")
