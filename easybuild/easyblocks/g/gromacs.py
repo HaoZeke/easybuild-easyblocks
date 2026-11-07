@@ -56,6 +56,25 @@ from easybuild.tools.utilities import nub
 from easybuild.tools.version import VERBOSE_VERSION as EASYBUILD_VERSION
 
 
+def det_hdf5_configopts(gromacs_version, hdf5_root, configopts):
+    """
+    Determine the CMake options that enable HDF5 (H5MD) support for this GROMACS version.
+
+    GROMACS 2025 forces GMX_USE_HDF5 off in src/gromacs/fileio/CMakeLists.txt; from 2026 onwards
+    -DGMX_USE_HDF5=ON makes CMake fail if HDF5 is not found. Options already in configopts are kept.
+
+    :param gromacs_version: GROMACS version (LooseVersion or string)
+    :param hdf5_root: installation prefix of the HDF5 dependency, or None if HDF5 is not a dependency
+    :param configopts: configure options already set in the easyconfig
+    """
+    opts = []
+    if LooseVersion(str(gromacs_version)) >= '2026' and hdf5_root and '-DGMX_USE_HDF5' not in configopts:
+        opts.append('-DGMX_USE_HDF5=ON')
+        if '-DHDF5_ROOT' not in configopts:
+            opts.append('-DHDF5_ROOT=%s' % hdf5_root)
+    return opts
+
+
 class EB_GROMACS(CMakeMake):
     """Support for building/installing GROMACS."""
 
@@ -308,6 +327,10 @@ class EB_GROMACS(CMakeMake):
         if gromacs_version >= '2016' and get_software_root('hwloc'):
             self.cfg.update('configopts', '-DGMX_HWLOC=ON')
             self.cfg.update('configopts', '-DHWLOC_DIR=%s' % get_software_root('hwloc'))
+
+        # Enable HDF5 support (added in v2026) if it's listed as dependency
+        for opt in det_hdf5_configopts(gromacs_version, get_software_root('HDF5'), self.cfg['configopts']):
+            self.cfg.update('configopts', opt)
 
         # Ensure that the GROMACS log files report how the code was patched
         # during the build, so that any problems are easier to diagnose.
