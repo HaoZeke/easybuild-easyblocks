@@ -81,6 +81,136 @@ NVHPC_MINIMAL_EXAMPLE = """
 int main(){ return 0; }
 """
 
+
+# Explicit sysroots supply both NVHPC link libraries and startup objects.
+SYSROOT_STDOBJ_LIBDIR_CANDIDATES = {
+    X86_64: (
+        'usr/lib64',
+        'lib64',
+        'usr/lib/x86_64-linux-gnu',
+        'usr/lib',
+        'lib',
+    ),
+    AARCH64: (
+        'usr/lib64',
+        'lib64',
+        'usr/lib/aarch64-linux-gnu',
+        'usr/lib',
+        'lib',
+    ),
+}
+
+# Startup objects named by NVIDIA staff when describing DEFSTDOBJDIR.
+REQUIRED_STDOBJ_FILES = ('crt1.o', 'crti.o')
+REQUIRED_LIBC_FILES = ('libc.so.6',)
+
+# Public localrc examples use unquoted paths; reject ambiguous characters.
+LOCALRC_PATH_FORBIDDEN_CHARS = (' ', '\t', '\n', '\r', ';', '#', '"', "'", '\\')
+
+
+def validate_unquoted_localrc_path(path, label):
+    """Fail loud if path cannot be embedded in an unquoted localrc assignment."""
+    if not path:
+        raise EasyBuildError("%s path is empty", label)
+    if not os.path.isabs(path):
+        raise EasyBuildError("%s path must be absolute: %s", label, path)
+    bad = [ch for ch in LOCALRC_PATH_FORBIDDEN_CHARS if ch in path]
+    if bad:
+        raise EasyBuildError(
+            "%s path %s contains characters %s that are unsafe for unquoted localrc values",
+            label, path, repr(''.join(bad)),
+        )
+    return path
+
+
+def resolve_sysroot_abi_libdir(sysroot, cpu_arch):
+    """
+    Resolve the sysroot libdir that holds startup objects and libc.so.6 together.
+
+    Fail loud on partial directories. Used for DEFSTDOBJDIR and LIBRARY_PATH
+    prepend only; other localrc controls retain the vendor defaults.
+    """
+    sysroot = validate_unquoted_localrc_path(sysroot, 'EasyBuild --sysroot')
+    if not os.path.isdir(sysroot):
+        raise EasyBuildError("EasyBuild --sysroot does not exist or is not a directory: %s", sysroot)
+
+    candidates = SYSROOT_STDOBJ_LIBDIR_CANDIDATES.get(cpu_arch)
+    if not candidates:
+        raise EasyBuildError(
+            "EasyBuild --sysroot has no known libdir layout for CPU architecture %s",
+            cpu_arch,
+        )
+
+    inspected = []
+    for rel in candidates:
+        libdir = os.path.join(sysroot, rel)
+        inspected.append(libdir)
+        if not os.path.isdir(libdir):
+            continue
+        missing = [name for name in REQUIRED_STDOBJ_FILES + REQUIRED_LIBC_FILES
+                   if not os.path.exists(os.path.join(libdir, name))]
+        if missing:
+            continue
+        return validate_unquoted_localrc_path(os.path.realpath(libdir), 'sysroot ABI libdir')
+
+    raise EasyBuildError(
+        "EasyBuild --sysroot=%s is set, but no %s libdir under it contains %s together with %s. "
+        "Inspected: %s. Refusing to guess a partial ABI directory.",
+        sysroot,
+        cpu_arch,
+        ', '.join(REQUIRED_STDOBJ_FILES),
+        ', '.join(REQUIRED_LIBC_FILES),
+        ', '.join(inspected),
+    )
+
+
+def build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir):
+    """Return localrc text that sets DEFSTDOBJDIR only (vendor-documented)."""
+    sysroot_libdir = validate_unquoted_localrc_path(sysroot_libdir, 'DEFSTDOBJDIR')
+    return (
+        '\n'
+        '# EasyBuild --sysroot: startup objects (crt1.o/crti.o) via DEFSTDOBJDIR.\n'
+        f'set DEFSTDOBJDIR={sysroot_libdir};\n'
+    )
+
+
+def prepend_sysroot_to_library_path_env(env, sysroot_libdir):
+    """
+    Return a *new* env mapping with sysroot_libdir prepended to LIBRARY_PATH.
+
+    Prepend is required for link-time selection; appending after a host hit does
+    not rescue the wrong libc. Does not mutate the input mapping.
+    """
+    out = dict(env)
+    existing = out.get('LIBRARY_PATH') or ''
+    if existing:
+        out['LIBRARY_PATH'] = '%s:%s' % (sysroot_libdir, existing)
+    else:
+        out['LIBRARY_PATH'] = sysroot_libdir
+    return out
+
+
+def find_nvhpc_localrc_path(compilers_subdir):
+    """Return the localrc path under compilers_subdir, preferring bin/localrc."""
+    candidates = (
+        os.path.join(compilers_subdir, 'bin', 'localrc'),
+        os.path.join(compilers_subdir, 'localrc'),
+    )
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise EasyBuildError(
+        "EasyBuild --sysroot is set, but no NVHPC localrc was found under %s (tried %s)",
+        compilers_subdir,
+        ', '.join(candidates),
+    )
+
+
+def sysroot_link_control_enabled(sysroot):
+    """True when EasyBuild --sysroot requests NVHPC ABI/link control."""
+    return bool(sysroot)
+
+
 # C sources used for MPI example compiled in the sanity check, used as a replacement
 # for the one shipped with NVHPC <26.5. While hpcx v2.20 still contains the hello_c
 # example, hpcx v2.50 dropped the test codes entirely.
@@ -413,6 +543,14 @@ class NvidiaBase(PackedBinary):
         # In the end, set LIBRARY_PATH equal to LD_LIBRARY_PATH
         self.module_load_environment.LIBRARY_PATH = self.module_load_environment.LD_LIBRARY_PATH
 
+        # The sysroot ABI directory precedes host libraries in generated modules.
+        sysroot = build_option('sysroot')
+        if sysroot_link_control_enabled(sysroot):
+            sysroot_libdir = resolve_sysroot_abi_libdir(sysroot, get_cpu_architecture())
+            self.module_load_environment.LIBRARY_PATH = (
+                [sysroot_libdir] + list(self.module_load_environment.LIBRARY_PATH)
+            )
+
     def __init__(self, *args, **kwargs):
         """Easyblock constructor, define custom class variables specific to NVHPC."""
         super().__init__(*args, **kwargs)
@@ -500,7 +638,27 @@ class NvidiaBase(PackedBinary):
         else:
             cmd = f"{makelocalrc_filename} -x {compilers_subdir} -g77 /"
 
-        run_shell_cmd(cmd)
+        # makelocalrc and compiler startup objects use the requested sysroot ABI.
+        sysroot = build_option('sysroot')
+        makelocalrc_env = None
+        sysroot_libdir = None
+        if sysroot_link_control_enabled(sysroot):
+            sysroot_libdir = resolve_sysroot_abi_libdir(sysroot, get_cpu_architecture())
+            makelocalrc_env = prepend_sysroot_to_library_path_env(os.environ, sysroot_libdir)
+            self.log.info(
+                "EasyBuild --sysroot ABI libdir selected for LIBRARY_PATH/DEFSTDOBJDIR"
+            )
+
+        run_shell_cmd(cmd, env=makelocalrc_env)
+
+        if sysroot_libdir:
+            localrc_path = find_nvhpc_localrc_path(compilers_subdir)
+            write_file(
+                localrc_path,
+                build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir),
+                append=True,
+            )
+            self.log.info("Appended EasyBuild --sysroot DEFSTDOBJDIR override to localrc")
 
         # If an OS libnuma is NOT found, makelocalrc creates symbolic links to libpgnuma.so
         # If we use the EB libnuma, delete those symbolic links to ensure they are not used

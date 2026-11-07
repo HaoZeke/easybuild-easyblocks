@@ -45,11 +45,12 @@ import test.easyblocks.easyblock_specific as e
 import test.easyblocks.general as g
 import test.easyblocks.init_easyblocks as i
 import test.easyblocks.module as m
+import test.easyblocks.nvidiabase_sysroot as ns
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
     def __init__(self, loader):
-        super().__init__([x.suite(loader) for x in [g, i, m, e]])
+        super().__init__([x.suite(loader) for x in [g, i, m, e, ns]])
 
     def run(self, *args, **kwargs):
         # initialize logger for all the unit tests
