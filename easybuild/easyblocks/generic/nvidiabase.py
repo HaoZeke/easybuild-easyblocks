@@ -165,12 +165,22 @@ def resolve_sysroot_abi_libdir(sysroot, cpu_arch):
 
 
 def build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir):
-    """Return localrc text that sets DEFSTDOBJDIR only (vendor-documented)."""
+    """
+    Return localrc text that takes startup objects and the default link libraries
+    from the sysroot libdir (DEFSTDOBJDIR and DEFLIBDIR, both vendor-documented).
+
+    The driver resolves -lc, -lm and the other default libraries through DEFLIBDIR
+    before LIBRARY_PATH, so a sysroot with a newer glibc than the host needs both
+    settings: with DEFSTDOBJDIR alone the link mixes the sysroot startup objects
+    and the toolchain libstdc++ with the host libc and fails on versioned symbols.
+    """
     sysroot_libdir = validate_unquoted_localrc_path(sysroot_libdir, 'DEFSTDOBJDIR')
     return (
         '\n'
-        '# EasyBuild --sysroot: startup objects (crt1.o/crti.o) via DEFSTDOBJDIR.\n'
+        '# EasyBuild --sysroot: startup objects (crt1.o/crti.o) via DEFSTDOBJDIR and the\n'
+        '# default link libraries (libc, libm, ...) via DEFLIBDIR from the same libdir.\n'
         f'set DEFSTDOBJDIR={sysroot_libdir};\n'
+        f'set DEFLIBDIR={sysroot_libdir};\n'
     )
 
 
