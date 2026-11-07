@@ -99,6 +99,28 @@ def configure_pytorch_xml_reports(path, variable):
                               backup=False, on_missing_match=ERROR)
 
 
+def pytorch_cuda_arch_list(cuda_cc):
+    """Build TORCH_CUDA_ARCH_LIST with PTX for the highest configured architecture.
+
+    EasyBuild's CUDA sanity check requires fatbin PTX for the highest entry in
+    cuda_compute_capabilities. PyTorch only emits that PTX when an arch is
+    suffixed with +PTX (see CUDA_SELECT_NVCC_ARCH_FLAGS / TORCH_CUDA_ARCH_LIST).
+    Preserve any user-specified +PTX; append +PTX to the highest bare arch
+    (LooseVersion order, so 9.0a ranks above 9.0 and 8.0) when missing.
+    """
+    entries = [str(cc) for cc in cuda_cc]
+    if not entries:
+        return ''
+
+    def bare(cc):
+        return cc[:-len('+PTX')] if cc.endswith('+PTX') else cc
+
+    highest_idx = max(range(len(entries)), key=lambda i: LooseVersion(bare(entries[i])))
+    if not entries[highest_idx].endswith('+PTX'):
+        entries[highest_idx] = entries[highest_idx] + '+PTX'
+    return ';'.join(entries)
+
+
 def find_failed_test_names(tests_out):
     """Find failed names of failed test cases in the output of the test step
 
@@ -530,8 +552,9 @@ class EB_PyTorch(PythonPackage):
             self.log.info('Compiling with specified list of CUDA compute capabilities: %s', ', '.join(cuda_cc))
             # This variable is also used at runtime (e.g. for tests) and if it is not set PyTorch will automatically
             # determine the compute capability of a GPU in the system and use that which may fail tests if
-            # it is to new for the used nvcc
-            env.setvar('TORCH_CUDA_ARCH_LIST', ';'.join(cuda_cc))
+            # it is to new for the used nvcc. Request PTX for the highest configured arch so CUDA sanity
+            # checks find Fatbin ptx for that capability (e.g. 9.0a -> 9.0a+PTX).
+            env.setvar('TORCH_CUDA_ARCH_LIST', pytorch_cuda_arch_list(cuda_cc))
         else:
             # Disable CUDA
             options.append('USE_CUDA=0')
