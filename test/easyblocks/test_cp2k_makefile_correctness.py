@@ -70,7 +70,10 @@ class Cp2kMakefileCorrectness(unittest.TestCase):
         )
         environment = {'CFLAGS': '-O2 -DFROM_TOOLCHAIN', 'CPPFLAGS': '', 'LDFLAGS': '',
                        'FFLAGS': '-O2', 'MPICC': 'mpicc', 'MPIF90': 'mpif90'}
-        root = lambda name: '/modules/OpenMPI' if name == 'OpenMPI' else None
+
+        def root(name):
+            return '/modules/OpenMPI' if name == 'OpenMPI' else None
+
         with patch.dict(os.environ, environment):
             with patch('easybuild.easyblocks.c.cp2k.get_software_root', side_effect=root):
                 options = EB_CP2K.configure_common(block)
