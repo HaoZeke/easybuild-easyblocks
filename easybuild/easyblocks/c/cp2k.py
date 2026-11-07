@@ -577,7 +577,8 @@ class EB_CP2K(CMakeMake):
             'FCFLAGS': '$(FCFLAGS%s)' % optflags,
             'FCFLAGS2': '$(FCFLAGS%s)' % regflags,
 
-            'CFLAGS': ' %s %s %s $(FPIC) $(DEBUG) %s ' % (cflags, cppflags, ldflags, self.cfg['extracflags']),
+            'CFLAGS': ' $(DFLAGS) %s %s %s $(FPIC) $(DEBUG) %s ' % (
+                cflags, cppflags, ldflags, self.cfg['extracflags']),
             'DFLAGS': ' -D__parallel -D__BLACS -D__SCALAPACK -D__FFTSG %s' % self.cfg['extradflags'],
 
             'LIBS': os.getenv('LIBS', ''),

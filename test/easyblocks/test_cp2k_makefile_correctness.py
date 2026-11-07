@@ -1,5 +1,6 @@
 """Check Makefile compilation and regression-result handling for CP2K."""
 
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -60,6 +61,34 @@ class Cp2kMakefileCorrectness(unittest.TestCase):
         ordinary = next(line for line in commands if '-o ordinary.o' in line)
         self.assertIn('-fno-tree-loop-vectorize', packing)
         self.assertNotIn('-fno-tree-loop-vectorize', ordinary)
+
+    def test_make_c_command_expands_parallel_and_optional_definitions(self):
+        block = SimpleNamespace(
+            cfg={'type': 'psmp', 'typeopt': True, 'extracflags': '', 'extradflags': ''},
+            toolchain=SimpleNamespace(get_flag=lambda name: '-fopenmp'),
+            openmp='', fpic='-fPIC', debug='', log=Mock(), make_instructions='',
+        )
+        environment = {'CFLAGS': '-O2 -DFROM_TOOLCHAIN', 'CPPFLAGS': '', 'LDFLAGS': '',
+                       'FFLAGS': '-O2', 'MPICC': 'mpicc', 'MPIF90': 'mpif90'}
+        root = lambda name: '/modules/OpenMPI' if name == 'OpenMPI' else None
+        with patch.dict(os.environ, environment):
+            with patch('easybuild.easyblocks.c.cp2k.get_software_root', side_effect=root):
+                options = EB_CP2K.configure_common(block)
+        options['DFLAGS'] += ' -D__HDF5 -D__SIRIUS'
+        generated = EB_CP2K._generate_makefile(block, options)
+        generated += '\nfeature.o: feature.c\n\t$(CC) $(CFLAGS) -c $< -o $@\n'
+        makefile = self.root / 'Makefile'
+        makefile.write_text(generated)
+        (self.root / 'feature.c').write_text('int feature;\n')
+        result = subprocess.run(
+            ['make', '-n', '-f', str(makefile), 'feature.o'], cwd=self.root,
+            check=True, capture_output=True, text=True,
+        )
+        command = result.stdout.strip()
+        self.assertIn('-D__parallel', command)
+        self.assertIn('-D__HDF5', command)
+        self.assertIn('-D__SIRIUS', command)
+        self.assertIn('-DFROM_TOOLCHAIN', command)
 
     def run_summary(self, wrong, failed):
         (self.root / 'tests').mkdir(exist_ok=True)
