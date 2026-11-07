@@ -42,6 +42,7 @@ import easybuild.tools.options as eboptions
 import easybuild.tools.tomllib as tomllib
 import easybuild.easyblocks.generic.pythonpackage as pythonpackage
 import easybuild.easyblocks.generic.cargo as cargo
+import easybuild.easyblocks.g.gromacs as gromacs
 import easybuild.easyblocks.l.lammps as lammps
 import easybuild.easyblocks.p.python as python
 import easybuild.easyblocks.p.pytorch as pytorch
@@ -51,7 +52,7 @@ from easybuild.easyblocks.generic.toolchain import Toolchain
 from easybuild.easyblocks.tensorflow import det_binutils_bin_path
 from easybuild.framework.easyblock import EasyBlock, get_easyblock_instance
 from easybuild.framework.easyconfig.easyconfig import process_easyconfig
-from easybuild.tools import config
+from easybuild.tools import LooseVersion, config
 from easybuild.tools.build_log import EasyBuildError
 from easybuild.tools.config import GENERAL_CLASS, get_module_syntax
 from easybuild.tools.environment import modify_env
@@ -721,6 +722,34 @@ class EasyBlockSpecificTest(TestCase):
             self.assertTrue(os.path.islink(cmd_path))
             expected_target = os.path.join(wrappers_dir, '%s.wrapper' % cmd, cmd)
             self.assertEqual(os.path.realpath(cmd_path), os.path.realpath(expected_target))
+
+    def test_gromacs_hdf5_configopts(self):
+        """Test det_hdf5_configopts function in GROMACS easyblock."""
+        det = gromacs.det_hdf5_configopts
+        hdf5_root = '/software/HDF5/2.1.1-gompi-2026.1'
+        hdf5_opts = ['-DGMX_USE_HDF5=ON', '-DHDF5_ROOT=%s' % hdf5_root]
+
+        # HDF5 not listed as dependency
+        for version in ('2025.4', '2026.0', '2026.3', '2026.4'):
+            self.assertEqual(det(version, None, ''), [])
+            self.assertEqual(det(version, '', ''), [])
+
+        # HDF5 listed as dependency
+        self.assertEqual(det('2026.4', hdf5_root, ''), hdf5_opts)
+        self.assertEqual(det('2026.3', hdf5_root, '-DGMX_TEST_TIMEOUT_FACTOR=3'), hdf5_opts)
+        self.assertEqual(det('2026.0', hdf5_root, ''), hdf5_opts)
+        self.assertEqual(det('2027', hdf5_root, ''), hdf5_opts)
+        self.assertEqual(det(LooseVersion('2026.4'), hdf5_root, ''), hdf5_opts)
+
+        # GROMACS 2025 forces GMX_USE_HDF5 off, so HDF5 is not enabled there
+        for version in ('2024.5', '2025.0', '2025.4', LooseVersion('2025.4')):
+            self.assertEqual(det(version, hdf5_root, ''), [])
+
+        # explicit settings in configopts are kept
+        for configopts in ('-DGMX_USE_HDF5=ON', '-DGMX_USE_HDF5=OFF', '-DGMX_USE_HDF5:BOOL=OFF',
+                           '-DGMX_TEST_TIMEOUT_FACTOR=3 -DGMX_USE_HDF5=OFF'):
+            self.assertEqual(det('2026.4', hdf5_root, configopts), [])
+        self.assertEqual(det('2026.4', hdf5_root, '-DHDF5_ROOT=/other/HDF5'), ['-DGMX_USE_HDF5=ON'])
 
     def test_translate_lammps_version(self):
         """Test translate_lammps_version function from LAMMPS easyblock"""
