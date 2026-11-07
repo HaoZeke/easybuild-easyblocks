@@ -514,6 +514,8 @@ class EB_PyTorch(PythonPackage):
             nccl_root = get_software_root('NCCL')
             if nccl_root:
                 options.append('USE_SYSTEM_NCCL=1')
+                options.append('NCCL_ROOT=' + nccl_root)
+                options.append('NCCL_LIB_DIR=' + os.path.join(nccl_root, 'lib'))
                 options.append('NCCL_INCLUDE_DIR=' + os.path.join(nccl_root, 'include'))
 
             # list of CUDA compute capabilities to use can be specifed in two ways (where (2) overrules (1)):
