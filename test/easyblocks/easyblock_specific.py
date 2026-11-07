@@ -816,7 +816,6 @@ class EasyBlockSpecificTest(TestCase):
         with self.assertRaisesRegex(EasyBuildError, "no HOST_ARCH known"):
             det(X86_64, cpu_target='x86_64/intel/unknown')
 
-
     def test_seissol_gpu_binary_name(self):
         """GPU binaries use DEVICE_ARCH and DEVICE_BACKEND, not HOST_ARCH."""
         exe = seissol.seissol_exe_name
@@ -842,7 +841,6 @@ class EasyBlockSpecificTest(TestCase):
             cc(['8.0', '9.0'])
         with self.assertRaisesRegex(EasyBuildError, "not major.minor"):
             cc(['sm_80'])
-
 
     def test_seissol_global_cuda_target(self):
         """The global CUDA target takes precedence over recipe defaults."""
