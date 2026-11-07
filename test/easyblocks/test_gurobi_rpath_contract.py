@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -74,6 +75,56 @@ class GurobiRpathContract(unittest.TestCase):
         result = subprocess.run([str(self.binary)], env=self.environment,
                                 check=True, capture_output=True, text=True)
         self.assertEqual(result.stdout, '42\n')
+
+    def build_library(self, name, *flags):
+        library = self.root / 'lib' / name
+        self.run_command('gcc', '-shared', '-fPIC', str(self.root / 'answer.c'), *flags,
+                         '-L' + str(self.root / 'bin/vendor'), '-lhelper',
+                         '-Wl,--disable-new-dtags,-rpath,$ORIGIN/../bin/vendor',
+                         '-Wl,-soname,' + name, '-o', str(library))
+        return library
+
+    def load_segments(self, path):
+        segments = []
+        for line in self.run_command('readelf', '-lW', str(path)).stdout.splitlines():
+            fields = line.split()
+            if fields and fields[0] == 'LOAD':
+                segments.append((int(fields[1], 16), int(fields[2], 16), int(fields[-1], 16)))
+        return segments
+
+    def test_large_load_alignment_survives_rpath_growth(self):
+        library = self.build_library('libwide.so', '-Wl,-z,max-page-size=0x200000')
+        self.assertEqual({align for _, _, align in self.load_segments(library)}, {0x200000})
+        additions = ['$ORIGIN/../lib', os.path.join(str(self.root), *['install'] * 400, 'lib')]
+        EB_Gurobi._append_permanent_lib_rpath(SimpleNamespace(), str(library), additions)
+        paths = self.run_command('patchelf', '--print-rpath', str(library)).stdout.strip().split(':')
+        self.assertEqual(paths, ['$ORIGIN/../bin/vendor'] + additions)
+        segments = self.load_segments(library)
+        self.assertGreater(len(segments), 4)
+        for offset, vaddr, align in segments:
+            self.assertEqual(align, 0x200000)
+            self.assertEqual((vaddr - offset) % align, 0)
+        result = subprocess.run([sys.executable, '-c', 'import ctypes, sys; '
+                                 'print(ctypes.CDLL(sys.argv[1]).answer())', str(library)],
+                                env=self.environment, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout, '42\n')
+
+    def test_four_kib_library_matches_plain_patchelf(self):
+        library = self.build_library('libnarrow.so')
+        self.assertEqual({align for _, _, align in self.load_segments(library)}, {0x1000})
+        reference = self.root / 'reference.so'
+        reference.write_bytes(library.read_bytes())
+        additions = ['$ORIGIN/../lib', os.path.join(str(self.root), *['install'] * 400, 'lib')]
+        self.run_command('patchelf', '--force-rpath', '--set-rpath',
+                         ':'.join(['$ORIGIN/../bin/vendor'] + additions), str(reference))
+        EB_Gurobi._append_permanent_lib_rpath(SimpleNamespace(), str(library), additions)
+        self.assertEqual(library.read_bytes(), reference.read_bytes())
+
+    def test_non_elf_file_is_left_untouched(self):
+        script = self.root / 'bin/launcher.sh'
+        script.write_text('#!/bin/sh\nexit 0\n')
+        EB_Gurobi._append_permanent_lib_rpath(SimpleNamespace(), str(script), self.additions)
+        self.assertEqual(script.read_text(), '#!/bin/sh\nexit 0\n')
 
     def test_unfiltered_install_does_not_require_patchelf(self):
         block = object.__new__(EB_Gurobi)

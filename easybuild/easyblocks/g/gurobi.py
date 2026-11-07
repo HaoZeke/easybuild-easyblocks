@@ -32,6 +32,7 @@ EasyBuild support for installing Gurobi, implemented as an easyblock
 """
 import os
 import shlex
+import struct
 
 from easybuild.easyblocks.generic.tarball import Tarball
 from easybuild.framework.easyconfig import CUSTOM
@@ -41,6 +42,32 @@ from easybuild.tools.config import build_option
 from easybuild.tools.filetools import copy_file, which
 from easybuild.tools.modules import get_software_root
 from easybuild.tools.run import run_shell_cmd
+
+PT_LOAD = 1
+# largest PT_LOAD alignment honoured via patchelf --page-size (x86_64 max-page-size)
+MAX_LOAD_ALIGNMENT = 0x200000
+
+
+def elf_load_segments(path):
+    """Return (p_offset, p_vaddr, p_align) for every PT_LOAD program header of an ELF file."""
+    with open(path, 'rb') as stream:
+        ident = stream.read(16)
+        if len(ident) < 16 or ident[:4] != b'\x7fELF' or ident[4] not in (1, 2) or ident[5] not in (1, 2):
+            raise EasyBuildError("Unsupported ELF header in %s", path)
+        endian = '<' if ident[5] == 1 else '>'
+        if ident[4] == 2:
+            ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIQQQIHHH', endian + 'IIQQQQQQ', 2, 3
+        else:
+            ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIIIIIHHH', endian + 'IIIIIIII', 1, 2
+        header = struct.unpack(ehdr, stream.read(struct.calcsize(ehdr)))
+        phoff, phentsize, phnum = header[4], header[8], header[9]
+        segments = []
+        for index in range(phnum):
+            stream.seek(phoff + index * phentsize)
+            entry = struct.unpack(phdr, stream.read(struct.calcsize(phdr)))
+            if entry[0] == PT_LOAD:
+                segments.append((entry[offset_idx], entry[vaddr_idx], entry[7]))
+    return segments
 
 
 class EB_Gurobi(Tarball):
@@ -125,14 +152,25 @@ class EB_Gurobi(Tarball):
         if entries == original and '(RPATH)' in dynamic:
             return
 
-        run_shell_cmd("patchelf --force-rpath --set-rpath %s %s" %
-                      (shlex.quote(':'.join(entries)), quoted_path), hidden=True)
+        alignments = [align for _, _, align in elf_load_segments(path)]
+        alignment = max(alignments + [1])
+        if alignment > MAX_LOAD_ALIGNMENT or alignment & (alignment - 1):
+            raise EasyBuildError("Unsupported PT_LOAD alignment %#x in %s", alignment, path)
+        # patchelf parses --page-size with atoi, so it must be decimal
+        page_size = '--page-size %d ' % alignment if alignment > 0x1000 else ''
+
+        run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s" %
+                      (page_size, shlex.quote(':'.join(entries)), quoted_path), hidden=True)
         recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
         if recorded.split(':') != entries:
             raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
         dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
         if '(RPATH)' not in dynamic:
             raise EasyBuildError("DT_RPATH was not recorded for %s", path)
+        minimum = min(alignments or [1])
+        for offset, vaddr, align in elf_load_segments(path):
+            if align < minimum or (align > 1 and (vaddr - offset) % align):
+                raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
 
     def sanity_check_step(self):
         """Custom sanity check for Gurobi."""
