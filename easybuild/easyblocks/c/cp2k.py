@@ -778,7 +778,11 @@ class EB_CP2K(CMakeMake):
 
         options['DFLAGS'] += ' -D__GFORTRAN'
 
-        options['FCFLAGSOPT'] += ' $(DFLAGS) $(CFLAGS) -fmax-stack-var-size=32768'
+        options['FCFLAGSOPT'] += ' $(DFLAGS) $(CFLAGS)'
+        if not self.toolchain.options.get('openmp', None):
+            # an explicit -fmax-stack-var-size overrides the -frecursive implied by -fopenmp and puts local
+            # arrays above the limit in static memory shared by all threads, so it is only set without OpenMP
+            options['FCFLAGSOPT'] += ' -fmax-stack-var-size=32768'
         options['FCFLAGSOPT2'] += ' $(DFLAGS) $(CFLAGS)'
 
         gcc_version = get_software_version('GCCcore') or get_software_version('GCC')
