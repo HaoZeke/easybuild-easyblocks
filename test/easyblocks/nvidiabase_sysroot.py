@@ -144,9 +144,18 @@ class NvidiaBaseSysrootHelpersTest(TestCase):
         self.assertEqual(sum(1 for line in lines if line.startswith('set DEFLIBDIR=')), 1)
         self.assertEqual(lines[0], 'set LFC=-lgfortran;')
         self.assertEqual(lines[-2], 'export PGI=$COMPBASE;')
-        self.assertEqual(lines[-1], 'append LDLIBARGS=-L/sysroot/usr/lib64 -Wl,-rpath-link,/sysroot/usr/lib64;')
+        self.assertEqual(lines[-1], 'append LDLIBARGS=-L/sysroot/usr/lib64 -rpath-link=/sysroot/usr/lib64;')
         # Applying the rewrite twice changes nothing more.
         self.assertEqual(rewrite_localrc_sysroot_settings(out, settings), out)
+
+    def test_rpath_link_uses_ld_native_form_not_Wl(self):
+        # nvc feeds LDLIBARGS to /usr/bin/ld directly; -Wl,... is a driver flag and
+        # makes ld fail with: unrecognized option '-Wl,-rpath-link,...'
+        text = "set DEFLIBDIR=/usr/lib64;\nset DEFSTDOBJDIR=/usr/lib64;\nset LDSO=/lib64/ld-linux-x86-64.so.2;\n"
+        settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
+        out = rewrite_localrc_sysroot_settings(text, settings)
+        self.assertIn('append LDLIBARGS=-L/sysroot/usr/lib64 -rpath-link=/sysroot/usr/lib64;', out.splitlines())
+        self.assertNotIn('-Wl,', out)
 
     def test_rewrite_without_sysroot_omits_ld_sysroot(self):
         """Compatibility: callers that omit sysroot must not emit ld --sysroot."""
