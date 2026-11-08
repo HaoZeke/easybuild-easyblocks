@@ -557,6 +557,10 @@ class EB_CP2K(EasyBlock):
         options['DFLAGS'] += ' -D__GFORTRAN'
 
         options['FCFLAGSOPT'] += ' $(DFLAGS) $(CFLAGS) -fmax-stack-var-size=32768'
+        if self.toolchain.options.get('openmp', None):
+            # an explicit -fmax-stack-var-size overrides the -frecursive implied by -fopenmp,
+            # which makes local arrays above the limit static and shared between threads
+            options['FCFLAGSOPT'] += ' -frecursive'
         options['FCFLAGSOPT2'] += ' $(DFLAGS) $(CFLAGS)'
 
         gcc_version = get_software_version('GCCcore') or get_software_version('GCC')
