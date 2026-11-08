@@ -24,14 +24,25 @@ class Cp2kMakefileCorrectness(unittest.TestCase):
         (self.root / 'src/hfxbase').mkdir(parents=True)
         (self.root / 'src/hfxbase/hfx_compression_core_methods.F').write_text('')
 
-    def configure(self, gcc_version):
+    def configure(self, gcc_version, openmp=True):
         block = SimpleNamespace(
             configure_common=lambda: {'DFLAGS': '', 'FCFLAGSOPT': '', 'FCFLAGSOPT2': ''},
+            toolchain=SimpleNamespace(options={'openmp': openmp}),
             version='2025.2', cfg={'start_dir': str(self.root)}, make_instructions='',
         )
         with patch('easybuild.easyblocks.c.cp2k.get_software_version', return_value=gcc_version):
             options = EB_CP2K.configure_GCC_based(block)
         return block, options
+
+    def test_stack_size_limit_is_left_out_of_openmp_builds(self):
+        # an explicit -fmax-stack-var-size overrides the -frecursive implied by -fopenmp
+        for version in ['13.3.0', '15.2.0']:
+            with self.subTest(version=version):
+                _, options = self.configure(version, openmp=True)
+                self.assertNotIn('-fmax-stack-var-size', options['FCFLAGSOPT'])
+                self.assertNotIn('-fmax-stack-var-size', options['FCFLAGSOPT2'])
+                _, options = self.configure(version, openmp=False)
+                self.assertIn('-fmax-stack-var-size=32768', options['FCFLAGSOPT'])
 
     def test_gcc15_workaround_is_limited_to_the_packing_object(self):
         for version in ['13.3.0', '14.3.0', '15.0.0', '15.2.0', '16.1.0']:
