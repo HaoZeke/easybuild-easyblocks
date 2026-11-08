@@ -191,13 +191,18 @@ def sysroot_localrc_settings(sysroot_libdir, sysroot_ldso):
     }
 
 
-def rewrite_localrc_sysroot_settings(localrc_text, settings):
+def rewrite_localrc_sysroot_settings(localrc_text, settings, sysroot=None):
     """
     Return localrc text with the sysroot settings applied in place.
 
     Each setting has one assignment, which keeps the link libraries, startup
     objects and dynamic loader on the same sysroot. Missing settings are
     appended to the vendor configuration.
+
+    The configured sysroot supplies GNU ld's --sysroot option through
+    LDLIBARGS, so absolute paths in libc linker scripts resolve under it.
+    The ABI library directory can be nested below the sysroot in a multiarch
+    layout. Omitting sysroot leaves the linker's sysroot option unset.
     """
     lines = localrc_text.splitlines()
     seen = set()
@@ -221,6 +226,12 @@ def rewrite_localrc_sysroot_settings(localrc_text, settings):
     rpath_link = 'append LDLIBARGS=-L%s -rpath-link=%s;' % (settings['DEFLIBDIR'], settings['DEFLIBDIR'])
     if rpath_link not in out:
         out.append(rpath_link)
+    if sysroot is not None:
+        sysroot = validate_unquoted_localrc_path(sysroot, 'EasyBuild --sysroot')
+        # Official ld option; resolves absolute GROUP paths in sysroot libc.so scripts.
+        ld_sysroot = 'append LDLIBARGS=--sysroot=%s;' % sysroot
+        if ld_sysroot not in out:
+            out.append(ld_sysroot)
     return '\n'.join(out) + '\n'
 
 
@@ -720,7 +731,11 @@ class NvidiaBase(PackedBinary):
         if sysroot_libdir:
             localrc_path = find_nvhpc_localrc_path(compilers_subdir)
             settings = sysroot_localrc_settings(sysroot_libdir, sysroot_dynamic_linker(sysroot, sysroot_libdir))
-            write_file(localrc_path, rewrite_localrc_sysroot_settings(read_file(localrc_path), settings))
+            # Pass EasyBuild's configured sysroot for ld --sysroot=; do not derive it from sysroot_libdir.
+            write_file(
+                localrc_path,
+                rewrite_localrc_sysroot_settings(read_file(localrc_path), settings, sysroot=sysroot),
+            )
             self.log.info("Rewrote localrc %s for EasyBuild --sysroot: %s", localrc_path,
                           ' '.join('%s=%s' % item for item in settings.items()))
 

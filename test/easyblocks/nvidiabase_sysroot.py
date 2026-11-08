@@ -148,6 +148,54 @@ class NvidiaBaseSysrootHelpersTest(TestCase):
         # Applying the rewrite twice changes nothing more.
         self.assertEqual(rewrite_localrc_sysroot_settings(out, settings), out)
 
+    def test_rewrite_without_sysroot_omits_ld_sysroot(self):
+        """Compatibility: callers that omit sysroot must not emit ld --sysroot."""
+        text = "set DEFLIBDIR=/usr/lib64;\nset DEFSTDOBJDIR=/usr/lib64;\nset LDSO=/lib64/ld-linux-x86-64.so.2;\n"
+        settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
+        out = rewrite_localrc_sysroot_settings(text, settings)
+        self.assertNotIn('--sysroot=', out)
+
+    def test_rewrite_propagates_configured_sysroot_to_ld_sysroot(self):
+        """
+        EasyBuild --sysroot must become official ld --sysroot=PATH in LDLIBARGS.
+
+        Use a multiarch ABI libdir so a dirname-strip of DEFLIBDIR would invent the
+        wrong prefix; the configured sysroot argument is authoritative.
+        """
+        text = (
+            "set DEFLIBDIR=/usr/lib/x86_64-linux-gnu;\n"
+            "set DEFSTDOBJDIR=/usr/lib/x86_64-linux-gnu;\n"
+            "set LDSO=/lib64/ld-linux-x86-64.so.2;\n"
+        )
+        abi_libdir = '/eessi/compat/usr/lib/x86_64-linux-gnu'
+        settings = sysroot_localrc_settings(abi_libdir, abi_libdir + '/ld-linux-x86-64.so.2')
+        configured = '/eessi/compat'
+        out = rewrite_localrc_sysroot_settings(text, settings, sysroot=configured)
+        lines = out.splitlines()
+        self.assertIn('append LDLIBARGS=--sysroot=/eessi/compat;', lines)
+        self.assertIn(
+            'append LDLIBARGS=-L/eessi/compat/usr/lib/x86_64-linux-gnu '
+            '-rpath-link=/eessi/compat/usr/lib/x86_64-linux-gnu;',
+            lines,
+        )
+        # Stripping the multiarch ABI libdir must not invent alternate --sysroot values.
+        self.assertNotIn('append LDLIBARGS=--sysroot=/eessi/compat/usr/lib;', out)
+        self.assertNotIn('append LDLIBARGS=--sysroot=/eessi/compat/usr;', out)
+        self.assertNotIn('append LDLIBARGS=--sysroot=/eessi;', out)
+        # Idempotent with the same configured sysroot.
+        self.assertEqual(
+            rewrite_localrc_sysroot_settings(out, settings, sysroot=configured),
+            out,
+        )
+
+    def test_rewrite_rejects_unsafe_sysroot_for_ld_sysroot(self):
+        text = "set DEFLIBDIR=/usr/lib64;\nset DEFSTDOBJDIR=/usr/lib64;\nset LDSO=/lib64/ld-linux-x86-64.so.2;\n"
+        settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
+        with self.assertRaises(EasyBuildError):
+            rewrite_localrc_sysroot_settings(text, settings, sysroot='/bad path/with space')
+        with self.assertRaises(EasyBuildError):
+            rewrite_localrc_sysroot_settings(text, settings, sysroot='relative/sysroot')
+
     def test_rewrite_appends_keys_makelocalrc_did_not_emit(self):
         text = "set LFC=-lgfortran;\nset DEFLIBDIR=/usr/lib64;\nset DEFLIBDIR=/opt/lib64;\n"
         settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
