@@ -137,3 +137,17 @@ class GurobiRpathContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+    def test_only_library_directories_are_rewritten(self):
+        """The vendor executables under bin/ keep their shipped dynamic section."""
+        (self.root / 'lib64').mkdir()
+        (self.root / 'matlab').mkdir()
+        (self.root / 'lib64/libother.so').write_bytes(b'\x7fELF')
+        (self.root / 'matlab/libmex.so').write_bytes(b'\x7fELF')
+        (self.root / 'lib/README').write_text('not a library\n')
+        os.symlink('libanswer.so', self.root / 'lib/libanswer.so.1')
+        selected = EB_Gurobi._library_files(str(self.root))
+        relative = sorted(os.path.relpath(path, self.root) for path in selected)
+        self.assertEqual(relative, ['lib/README', 'lib/libanswer.so', 'lib64/libother.so', 'matlab/libmex.so'])
+        self.assertNotIn(str(self.binary), selected)
+        self.assertNotIn(str(self.root / 'bin/vendor/libhelper.so'), selected)

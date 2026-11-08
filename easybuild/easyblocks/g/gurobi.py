@@ -114,8 +114,27 @@ class EB_Gurobi(Tarball):
         copy_file(os.path.join(libbuilddir, "libgurobi_c++.a"), os.path.join(self.installdir, "lib"))
         run_shell_cmd("make clean", work_dir=libbuilddir)
 
+    # Directories whose shared libraries get the install library directory on their RPATH.
+    # The vendor executables under bin/ are left as shipped: they carry their own loader
+    # path to ../lib, and rewriting the dynamic section of a large non-PIE executable with
+    # patchelf adds a load segment at virtual address 0, after which gurobi_cl crashes.
+    LIBRARY_SUBDIRS = ('lib', 'lib64', 'matlab')
+
+    @staticmethod
+    def _library_files(installdir):
+        """Return the regular files under the library directories of installdir, sorted."""
+        files = []
+        for subdir in EB_Gurobi.LIBRARY_SUBDIRS:
+            root = os.path.join(installdir, subdir)
+            for directory, _, filenames in os.walk(root):
+                for filename in filenames:
+                    path = os.path.join(directory, filename)
+                    if not os.path.islink(path) and os.path.isfile(path):
+                        files.append(path)
+        return sorted(files)
+
     def post_processing_step(self):
-        """Keep shipped binaries runnable when the module omits LD_LIBRARY_PATH."""
+        """Keep shipped libraries resolvable when the module omits LD_LIBRARY_PATH."""
         super().post_processing_step()
 
         if 'LD_LIBRARY_PATH' not in (build_option('filter_env_vars') or []):
@@ -124,13 +143,8 @@ class EB_Gurobi(Tarball):
             raise EasyBuildError("patchelf is required when LD_LIBRARY_PATH is filtered")
 
         additions = ['$ORIGIN/../lib', os.path.join(self.installdir, 'lib')]
-        for subdir in ('bin', 'lib', 'lib64', 'matlab'):
-            root = os.path.join(self.installdir, subdir)
-            for directory, _, filenames in os.walk(root):
-                for filename in filenames:
-                    path = os.path.join(directory, filename)
-                    if not os.path.islink(path) and os.path.isfile(path):
-                        self._append_permanent_lib_rpath(path, additions)
+        for path in self._library_files(self.installdir):
+            self._append_permanent_lib_rpath(path, additions)
 
     def _append_permanent_lib_rpath(self, path, additions):
         """Record the install library directory without discarding vendor paths."""
