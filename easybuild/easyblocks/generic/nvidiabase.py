@@ -195,10 +195,9 @@ def rewrite_localrc_sysroot_settings(localrc_text, settings):
     """
     Return localrc text with the sysroot settings applied in place.
 
-    The driver takes the first assignment of a localrc variable, so a second
-    `set DEFLIBDIR=...;` appended at the end leaves the host libdir from
-    makelocalrc in force; the existing assignment is rewritten, and a key that
-    makelocalrc did not emit is appended.
+    Each setting has one assignment, which keeps the link libraries, startup
+    objects and dynamic loader on the same sysroot. Missing settings are
+    appended to the vendor configuration.
     """
     lines = localrc_text.splitlines()
     seen = set()
@@ -217,9 +216,9 @@ def rewrite_localrc_sysroot_settings(localrc_text, settings):
     if missing:
         out.append('# EasyBuild --sysroot: default link libraries, startup objects and loader from the sysroot.')
         out.extend('set %s=%s;' % (key, settings[key]) for key in missing)
-    # ld resolves the DT_NEEDED libc of the toolchain libstdc++ through -rpath-link and
-    # its default directories, not through -L, so the sysroot libdir is named there too.
-    rpath_link = 'append LDLIBARGS=-L%s -Wl,-rpath-link,%s;' % (settings['DEFLIBDIR'], settings['DEFLIBDIR'])
+    # ld uses -rpath-link to resolve libc needed by the toolchain libstdc++.
+    # LDLIBARGS passes directly to ld and requires its native option spelling.
+    rpath_link = 'append LDLIBARGS=-L%s -rpath-link=%s;' % (settings['DEFLIBDIR'], settings['DEFLIBDIR'])
     if rpath_link not in out:
         out.append(rpath_link)
     return '\n'.join(out) + '\n'
@@ -231,7 +230,7 @@ def build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir):
 
     A localrc that makelocalrc did not seed with the variable takes it from this
     snippet; a seeded localrc is rewritten in place by
-    rewrite_localrc_sysroot_settings, because the driver keeps the first assignment.
+    rewrite_localrc_sysroot_settings to keep one consistent assignment per key.
     """
     sysroot_libdir = validate_unquoted_localrc_path(sysroot_libdir, 'DEFSTDOBJDIR')
     return (
