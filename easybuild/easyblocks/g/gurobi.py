@@ -44,8 +44,21 @@ from easybuild.tools.modules import get_software_root
 from easybuild.tools.run import run_shell_cmd
 
 PT_LOAD = 1
+ET_EXEC = 2
+# lowest address a load segment may start at; the kernel refuses to map page zero (vm.mmap_min_addr)
+MIN_LOAD_VADDR = 0x10000
 # largest PT_LOAD alignment honoured via patchelf --page-size (x86_64 max-page-size)
 MAX_LOAD_ALIGNMENT = 0x200000
+
+
+def elf_type(path):
+    """Return e_type of an ELF file (ET_EXEC for a fixed-address executable, ET_DYN for PIE and libraries)."""
+    with open(path, 'rb') as stream:
+        ident = stream.read(16)
+        if len(ident) < 16 or ident[:4] != b'\x7fELF' or ident[5] not in (1, 2):
+            raise EasyBuildError("Unsupported ELF header in %s", path)
+        endian = '<' if ident[5] == 1 else '>'
+        return struct.unpack(endian + 'H', stream.read(2))[0]
 
 
 def elf_load_segments(path):
@@ -114,17 +127,14 @@ class EB_Gurobi(Tarball):
         copy_file(os.path.join(libbuilddir, "libgurobi_c++.a"), os.path.join(self.installdir, "lib"))
         run_shell_cmd("make clean", work_dir=libbuilddir)
 
-    # Directories whose shared libraries get the install library directory on their RPATH.
-    # The vendor executables under bin/ are left as shipped: they carry their own loader
-    # path to ../lib, and rewriting the dynamic section of a large non-PIE executable with
-    # patchelf adds a load segment at virtual address 0, after which gurobi_cl crashes.
-    LIBRARY_SUBDIRS = ('lib', 'lib64', 'matlab')
+    # Directories whose ELF files get the install library directory on their RPATH.
+    INSTALL_SUBDIRS = ('bin', 'lib', 'lib64', 'matlab')
 
     @staticmethod
     def _library_files(installdir):
-        """Return the regular files under the library directories of installdir, sorted."""
+        """Return the regular files under the ELF directories of installdir, sorted."""
         files = []
-        for subdir in EB_Gurobi.LIBRARY_SUBDIRS:
+        for subdir in EB_Gurobi.INSTALL_SUBDIRS:
             root = os.path.join(installdir, subdir)
             for directory, _, filenames in os.walk(root):
                 for filename in filenames:
@@ -134,7 +144,7 @@ class EB_Gurobi(Tarball):
         return sorted(files)
 
     def post_processing_step(self):
-        """Keep shipped libraries resolvable when the module omits LD_LIBRARY_PATH."""
+        """Keep shipped binaries runnable when the module omits LD_LIBRARY_PATH."""
         super().post_processing_step()
 
         if 'LD_LIBRARY_PATH' not in (build_option('filter_env_vars') or []):
@@ -170,8 +180,13 @@ class EB_Gurobi(Tarball):
         alignment = max(alignments + [1])
         if alignment > MAX_LOAD_ALIGNMENT or alignment & (alignment - 1):
             raise EasyBuildError("Unsupported PT_LOAD alignment %#x in %s", alignment, path)
+        # A fixed-address executable gets its grown dynamic string table in a new segment
+        # below the image; at the large alignment that segment lands on page zero, which the
+        # kernel refuses to map (gurobi_cl 13.0.3: segment at 0x0, SIGSEGV at start). The
+        # default page size places it just below the image instead.
+        fixed_address = elf_type(path) == ET_EXEC
         # patchelf parses --page-size with atoi, so it must be decimal
-        page_size = '--page-size %d ' % alignment if alignment > 0x1000 else ''
+        page_size = '--page-size %d ' % alignment if alignment > 0x1000 and not fixed_address else ''
 
         run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s" %
                       (page_size, shlex.quote(':'.join(entries)), quoted_path), hidden=True)
@@ -181,8 +196,13 @@ class EB_Gurobi(Tarball):
         dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
         if '(RPATH)' not in dynamic:
             raise EasyBuildError("DT_RPATH was not recorded for %s", path)
+        segments = elf_load_segments(path)
+        if fixed_address:
+            if any(vaddr < MIN_LOAD_VADDR for _, vaddr, _ in segments):
+                raise EasyBuildError("RPATH rewrite placed a load segment below %#x in %s", MIN_LOAD_VADDR, path)
+            return
         minimum = min(alignments or [1])
-        for offset, vaddr, align in elf_load_segments(path):
+        for offset, vaddr, align in segments:
             if align < minimum or (align > 1 and (vaddr - offset) % align):
                 raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
 

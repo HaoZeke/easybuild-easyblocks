@@ -145,20 +145,35 @@ class GurobiRpathContract(unittest.TestCase):
                     block.post_processing_step()
         which.assert_not_called()
 
+    def test_install_directories_are_walked(self):
+        """bin, lib, lib64 and matlab are walked; links and other directories are not."""
+        (self.root / 'lib64').mkdir()
+        (self.root / 'matlab').mkdir()
+        (self.root / 'src').mkdir()
+        (self.root / 'lib64/libother.so').write_bytes(b'\x7fELF')
+        (self.root / 'matlab/libmex.so').write_bytes(b'\x7fELF')
+        (self.root / 'src/libskip.so').write_bytes(b'\x7fELF')
+        os.symlink('libanswer.so', self.root / 'lib/libanswer.so.1')
+        relative = sorted(os.path.relpath(path, self.root) for path in EB_Gurobi._library_files(str(self.root)))
+        self.assertEqual(relative, ['bin/check', 'bin/vendor/libhelper.so', 'lib/libanswer.so',
+                                    'lib64/libother.so', 'matlab/libmex.so'])
+
+    def test_fixed_address_executable_runs_after_rpath_growth(self):
+        """A non-PIE executable with 2 MiB load alignment still runs; no segment lands on page zero."""
+        executable = self.root / 'bin/fixed'
+        self.run_command('gcc', '-no-pie', str(self.root / 'main.c'), '-L' + str(self.root / 'lib'), '-lanswer',
+                         '-Wl,-rpath-link,' + str(self.root / 'bin/vendor'),
+                         '-Wl,-z,max-page-size=0x200000', '-o', str(executable))
+        self.assertEqual(open(executable, 'rb').read(18)[16], 2, 'test binary is ET_EXEC')
+        additions = ['$ORIGIN/../lib', str(self.root / 'lib')]
+        EB_Gurobi._append_permanent_lib_rpath(SimpleNamespace(), str(executable), additions)
+        library = self.root / 'lib/libanswer.so'
+        EB_Gurobi._append_permanent_lib_rpath(SimpleNamespace(), str(library), ['$ORIGIN/../bin/vendor'])
+        result = subprocess.run([str(executable)], env=self.environment, capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, '42'), result.stderr)
+        from easybuild.easyblocks.g.gurobi import elf_load_segments, MIN_LOAD_VADDR
+        self.assertTrue(all(vaddr >= MIN_LOAD_VADDR for _, vaddr, _ in elf_load_segments(str(executable))))
+
 
 if __name__ == '__main__':
     unittest.main()
-
-    def test_only_library_directories_are_rewritten(self):
-        """The vendor executables under bin/ keep their shipped dynamic section."""
-        (self.root / 'lib64').mkdir()
-        (self.root / 'matlab').mkdir()
-        (self.root / 'lib64/libother.so').write_bytes(b'\x7fELF')
-        (self.root / 'matlab/libmex.so').write_bytes(b'\x7fELF')
-        (self.root / 'lib/README').write_text('not a library\n')
-        os.symlink('libanswer.so', self.root / 'lib/libanswer.so.1')
-        selected = EB_Gurobi._library_files(str(self.root))
-        relative = sorted(os.path.relpath(path, self.root) for path in selected)
-        self.assertEqual(relative, ['lib/README', 'lib/libanswer.so', 'lib64/libother.so', 'matlab/libmex.so'])
-        self.assertNotIn(str(self.binary), selected)
-        self.assertNotIn(str(self.root / 'bin/vendor/libhelper.so'), selected)
