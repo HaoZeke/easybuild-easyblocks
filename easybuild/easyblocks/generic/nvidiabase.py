@@ -49,7 +49,7 @@ from easybuild.tools import LooseVersion
 from easybuild.tools.build_log import EasyBuildError, print_warning
 from easybuild.tools.config import build_option
 from easybuild.tools.filetools import adjust_permissions, remove, symlink
-from easybuild.tools.filetools import write_file, apply_regex_substitutions, resolve_path
+from easybuild.tools.filetools import write_file, read_file, apply_regex_substitutions, resolve_path
 from easybuild.tools.modules import MODULE_LOAD_ENV_HEADERS, get_software_root, get_software_version
 from easybuild.tools.run import run_shell_cmd
 from easybuild.tools.systemtools import AARCH64, X86_64, get_cpu_architecture, get_shared_lib_ext
@@ -164,23 +164,75 @@ def resolve_sysroot_abi_libdir(sysroot, cpu_arch):
     )
 
 
+LOCALRC_SYSROOT_KEYS = ('DEFSTDOBJDIR', 'DEFLIBDIR', 'LDSO')
+
+
+def sysroot_dynamic_linker(sysroot, sysroot_libdir):
+    """
+    Return the dynamic linker that belongs to the sysroot libc.
+
+    Binaries the driver links against the sysroot glibc must also start under that
+    glibc's loader, so LDSO follows the sysroot like DEFLIBDIR does.
+    """
+    candidates = glob(os.path.join(sysroot_libdir, 'ld-linux*.so*')) + glob(os.path.join(sysroot_libdir, 'ld-*.so*'))
+    candidates = [c for c in candidates if not os.path.islink(c)] or candidates
+    if not candidates:
+        raise EasyBuildError("EasyBuild --sysroot=%s has no dynamic linker under %s", sysroot, sysroot_libdir)
+    return validate_unquoted_localrc_path(os.path.realpath(sorted(candidates)[0]), 'LDSO')
+
+
+def sysroot_localrc_settings(sysroot_libdir, sysroot_ldso):
+    """Return the localrc key/value pairs that move the default link onto the sysroot libc."""
+    sysroot_libdir = validate_unquoted_localrc_path(sysroot_libdir, 'DEFSTDOBJDIR')
+    return {
+        'DEFSTDOBJDIR': sysroot_libdir,
+        'DEFLIBDIR': sysroot_libdir,
+        'LDSO': sysroot_ldso,
+    }
+
+
+def rewrite_localrc_sysroot_settings(localrc_text, settings):
+    """
+    Return localrc text with the sysroot settings applied in place.
+
+    The driver takes the first assignment of a localrc variable, so a second
+    `set DEFLIBDIR=...;` appended at the end leaves the host libdir from
+    makelocalrc in force; the existing assignment is rewritten, and a key that
+    makelocalrc did not emit is appended.
+    """
+    lines = localrc_text.splitlines()
+    seen = set()
+    out = []
+    for line in lines:
+        match = re.match(r'^\s*set\s+(%s)\s*=.*;\s*$' % '|'.join(settings), line)
+        if match:
+            key = match.group(1)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append('set %s=%s;' % (key, settings[key]))
+        else:
+            out.append(line)
+    missing = [key for key in settings if key not in seen]
+    if missing:
+        out.append('# EasyBuild --sysroot: default link libraries, startup objects and loader from the sysroot.')
+        out.extend('set %s=%s;' % (key, settings[key]) for key in missing)
+    return '\n'.join(out) + '\n'
+
+
 def build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir):
     """
-    Return localrc text that takes startup objects and the default link libraries
-    from the sysroot libdir (DEFSTDOBJDIR and DEFLIBDIR, both vendor-documented).
+    Return localrc text that sets DEFSTDOBJDIR only (vendor-documented).
 
-    The driver resolves -lc, -lm and the other default libraries through DEFLIBDIR
-    before LIBRARY_PATH, so a sysroot with a newer glibc than the host needs both
-    settings: with DEFSTDOBJDIR alone the link mixes the sysroot startup objects
-    and the toolchain libstdc++ with the host libc and fails on versioned symbols.
+    A localrc that makelocalrc did not seed with the variable takes it from this
+    snippet; a seeded localrc is rewritten in place by
+    rewrite_localrc_sysroot_settings, because the driver keeps the first assignment.
     """
     sysroot_libdir = validate_unquoted_localrc_path(sysroot_libdir, 'DEFSTDOBJDIR')
     return (
         '\n'
-        '# EasyBuild --sysroot: startup objects (crt1.o/crti.o) via DEFSTDOBJDIR and the\n'
-        '# default link libraries (libc, libm, ...) via DEFLIBDIR from the same libdir.\n'
+        '# EasyBuild --sysroot: startup objects (crt1.o/crti.o) via DEFSTDOBJDIR.\n'
         f'set DEFSTDOBJDIR={sysroot_libdir};\n'
-        f'set DEFLIBDIR={sysroot_libdir};\n'
     )
 
 
@@ -663,12 +715,10 @@ class NvidiaBase(PackedBinary):
 
         if sysroot_libdir:
             localrc_path = find_nvhpc_localrc_path(compilers_subdir)
-            write_file(
-                localrc_path,
-                build_sysroot_defstdobjdir_localrc_snippet(sysroot_libdir),
-                append=True,
-            )
-            self.log.info("Appended EasyBuild --sysroot DEFSTDOBJDIR override to localrc")
+            settings = sysroot_localrc_settings(sysroot_libdir, sysroot_dynamic_linker(sysroot, sysroot_libdir))
+            write_file(localrc_path, rewrite_localrc_sysroot_settings(read_file(localrc_path), settings))
+            self.log.info("Rewrote localrc %s for EasyBuild --sysroot: %s", localrc_path,
+                          ' '.join('%s=%s' % item for item in settings.items()))
 
         # If an OS libnuma is NOT found, makelocalrc creates symbolic links to libpgnuma.so
         # If we use the EB libnuma, delete those symbolic links to ensure they are not used

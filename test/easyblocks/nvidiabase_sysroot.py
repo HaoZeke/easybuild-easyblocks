@@ -39,6 +39,9 @@ from easybuild.tools.systemtools import AARCH64, X86_64
 from easybuild.easyblocks.generic.nvidiabase import (
     build_sysroot_defstdobjdir_localrc_snippet,
     find_nvhpc_localrc_path,
+    rewrite_localrc_sysroot_settings,
+    sysroot_dynamic_linker,
+    sysroot_localrc_settings,
     prepend_sysroot_to_library_path_env,
     resolve_sysroot_abi_libdir,
     sysroot_link_control_enabled,
@@ -118,6 +121,56 @@ class NvidiaBaseSysrootHelpersTest(TestCase):
             'append SITELIB',
         ):
             self.assertNotIn(banned, text)
+
+    def test_rewrite_replaces_first_assignment_in_place(self):
+        text = (
+            "set LFC=-lgfortran;\n"
+            "set LDSO=/lib64/ld-linux-x86-64.so.2;\n"
+            "set GCCDIR=/gcc/lib/gcc/x86_64-pc-linux-gnu/15.2.0;\n"
+            "set DEFLIBDIR=/usr/lib64;\n"
+            "set DEFSTDOBJDIR=/usr/lib64;\n"
+            "export PGI=$COMPBASE;\n"
+        )
+        settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
+        out = rewrite_localrc_sysroot_settings(text, settings)
+        lines = out.splitlines()
+        # The host assignments are gone, each key is assigned once, order is kept.
+        self.assertNotIn('set DEFLIBDIR=/usr/lib64;', lines)
+        self.assertNotIn('set DEFSTDOBJDIR=/usr/lib64;', lines)
+        self.assertNotIn('set LDSO=/lib64/ld-linux-x86-64.so.2;', lines)
+        self.assertEqual(lines.index('set LDSO=/sysroot/usr/lib64/ld-linux-x86-64.so.2;'), 1)
+        self.assertEqual(lines.index('set DEFLIBDIR=/sysroot/usr/lib64;'), 3)
+        self.assertEqual(lines.index('set DEFSTDOBJDIR=/sysroot/usr/lib64;'), 4)
+        self.assertEqual(sum(1 for line in lines if line.startswith('set DEFLIBDIR=')), 1)
+        self.assertEqual(lines[0], 'set LFC=-lgfortran;')
+        self.assertEqual(lines[-1], 'export PGI=$COMPBASE;')
+
+    def test_rewrite_appends_keys_makelocalrc_did_not_emit(self):
+        text = "set LFC=-lgfortran;\nset DEFLIBDIR=/usr/lib64;\nset DEFLIBDIR=/opt/lib64;\n"
+        settings = sysroot_localrc_settings('/sysroot/usr/lib64', '/sysroot/usr/lib64/ld-linux-x86-64.so.2')
+        out = rewrite_localrc_sysroot_settings(text, settings)
+        lines = out.splitlines()
+        # A duplicate host assignment collapses into the one rewritten line.
+        self.assertEqual(sum(1 for line in lines if line.startswith('set DEFLIBDIR=')), 1)
+        self.assertIn('set DEFSTDOBJDIR=/sysroot/usr/lib64;', lines)
+        self.assertIn('set LDSO=/sysroot/usr/lib64/ld-linux-x86-64.so.2;', lines)
+        self.assertTrue(out.endswith('\n'))
+
+    def test_sysroot_dynamic_linker_prefers_the_real_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            libdir = os.path.join(tmp, 'usr', 'lib64')
+            os.makedirs(libdir)
+            real = os.path.join(libdir, 'ld-linux-x86-64.so.2')
+            with open(real, 'w') as handle:
+                handle.write('')
+            os.symlink(real, os.path.join(libdir, 'ld-lsb-x86-64.so.3'))
+            self.assertEqual(sysroot_dynamic_linker(tmp, libdir), os.path.realpath(real))
+
+    def test_sysroot_dynamic_linker_missing_is_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, 'usr', 'lib64'))
+            with self.assertRaises(EasyBuildError):
+                sysroot_dynamic_linker(tmp, os.path.join(tmp, 'usr', 'lib64'))
 
     def test_find_localrc_prefers_bin(self):
         with tempfile.TemporaryDirectory() as tmp:
