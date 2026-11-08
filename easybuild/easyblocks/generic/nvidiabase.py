@@ -217,6 +217,11 @@ def rewrite_localrc_sysroot_settings(localrc_text, settings):
     if missing:
         out.append('# EasyBuild --sysroot: default link libraries, startup objects and loader from the sysroot.')
         out.extend('set %s=%s;' % (key, settings[key]) for key in missing)
+    # ld resolves the DT_NEEDED libc of the toolchain libstdc++ through -rpath-link and
+    # its default directories, not through -L, so the sysroot libdir is named there too.
+    rpath_link = 'append LDLIBARGS=-L%s -Wl,-rpath-link,%s;' % (settings['DEFLIBDIR'], settings['DEFLIBDIR'])
+    if rpath_link not in out:
+        out.append(rpath_link)
     return '\n'.join(out) + '\n'
 
 

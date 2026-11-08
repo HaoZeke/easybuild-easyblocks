@@ -143,7 +143,10 @@ class NvidiaBaseSysrootHelpersTest(TestCase):
         self.assertEqual(lines.index('set DEFSTDOBJDIR=/sysroot/usr/lib64;'), 4)
         self.assertEqual(sum(1 for line in lines if line.startswith('set DEFLIBDIR=')), 1)
         self.assertEqual(lines[0], 'set LFC=-lgfortran;')
-        self.assertEqual(lines[-1], 'export PGI=$COMPBASE;')
+        self.assertEqual(lines[-2], 'export PGI=$COMPBASE;')
+        self.assertEqual(lines[-1], 'append LDLIBARGS=-L/sysroot/usr/lib64 -Wl,-rpath-link,/sysroot/usr/lib64;')
+        # Applying the rewrite twice changes nothing more.
+        self.assertEqual(rewrite_localrc_sysroot_settings(out, settings), out)
 
     def test_rewrite_appends_keys_makelocalrc_did_not_emit(self):
         text = "set LFC=-lgfortran;\nset DEFLIBDIR=/usr/lib64;\nset DEFLIBDIR=/opt/lib64;\n"
