@@ -12,6 +12,17 @@ from unittest.mock import patch
 
 from easybuild.easyblocks.g.gurobi import EB_Gurobi
 from easybuild.easyblocks.generic.tarball import Tarball
+from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.config import build_option
+from easybuild.tools.options import set_up_configuration
+
+
+def setUpModule():
+    """run_shell_cmd reads build options, so a standalone run needs the configuration set up."""
+    try:
+        build_option('hooks')
+    except EasyBuildError:
+        set_up_configuration(args=['--prefix', tempfile.mkdtemp(prefix='gurobi-rpath-eb-')], silent=True)
 
 
 class GurobiRpathContract(unittest.TestCase):
