@@ -134,7 +134,11 @@ class EB_Libint(CMakeMake):
 
         else:
             if self.cfg['with_fortran']:
-                self.cfg.update('configopts', '-DENABLE_FORTRAN=ON')
+                # Libint 2.12.0 renamed the ENABLE_FORTRAN option to LIBINT2_ENABLE_FORTRAN
+                if self_version >= '2.12.0':
+                    self.cfg.update('configopts', '-DLIBINT2_ENABLE_FORTRAN=ON')
+                else:
+                    self.cfg.update('configopts', '-DENABLE_FORTRAN=ON')
 
             # also build shared libraries (not enabled by default)
             self.cfg.update('configopts', "-DLIBINT2_BUILD_SHARED_AND_STATIC_LIBS=ON")
