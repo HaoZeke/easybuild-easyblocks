@@ -138,8 +138,8 @@ def get_ld_preload_value_cuda_stubs():
     return os.pathsep.join(cuda_stub_lib_paths + ld_preload)
 
 
-def lammps_example_input(installdir, check_file):
-    """Locate the installed input for a named or nested sanity example."""
+def lammps_example_input(installdir, check_file, dry_run=False):
+    """Locate installed examples, or report their conventional paths in a dry run."""
     name = os.path.basename(check_file)
     example = os.path.join(installdir, 'examples', check_file, 'in.' + name)
     if os.path.isfile(example):
@@ -148,6 +148,8 @@ def lammps_example_input(installdir, check_file):
         nested = os.path.join(installdir, 'examples', 'PACKAGES', 'shock', name, 'in.' + name)
         if os.path.isfile(nested):
             return nested
+    if dry_run:
+        return example
     raise EasyBuildError("Could not find installed LAMMPS sanity input for %s", check_file)
 
 
@@ -753,7 +755,7 @@ class EB_LAMMPS(CMakeMake):
             # LAMMPS test - you need to call specific test file on path
             'from lammps import lammps; l=lammps(); l.file("%s")' %
             # Examples are part of the install with paths like (installdir)/examples/filename/in.filename
-            lammps_example_input(self.installdir, check_file)
+            lammps_example_input(self.installdir, check_file, dry_run=self.dry_run)
             # And this should be done for every file specified above
             for check_file in sanity_check_test_inputs
         ]
@@ -774,34 +776,34 @@ class EB_LAMMPS(CMakeMake):
             custom_commands.append(
                 'from lammps import lammps; '
                 'l=lammps(cmdargs=["-sf", "intel"]).file("%s") if "INTEL" in lammps().installed_packages else None' %
-                lammps_example_input(self.installdir, 'msst')
+                lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
             )
         if self.cfg['kokkos']:  # KOKKOS package
             if self.cuda:
                 if run_gpu_tests:
                     custom_commands.append(
                         'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
-                        'l.file("%s")' % lammps_example_input(self.installdir, 'msst')
+                        'l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                     )
             else:  # CPU only
                 custom_commands.append(
                     'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on"]); l.file("%s")' %
-                    lammps_example_input(self.installdir, 'msst')
+                    lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                 )
         elif run_gpu_tests:  # GPU package
             custom_commands.append(
                 'from lammps import lammps; l=lammps(cmdargs=["-sf", "gpu", "-pk", "gpu", "1"]); l.file("%s")' %
-                lammps_example_input(self.installdir, 'msst')
+                lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
             )
         if self.toolchain.options.get('openmp', None):  # OPENMP package
             custom_commands.append(
                 'from lammps import lammps; l=lammps(cmdargs=["-sf", "omp", "-pk", "omp", "2"]); l.file("%s")' %
-                lammps_example_input(self.installdir, 'msst')
+                lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
             )
         # OPT package
         custom_commands.append(
             'from lammps import lammps; l=lammps(cmdargs=["-sf", "opt"]); l.file("%s")' %
-            lammps_example_input(self.installdir, 'msst')
+            lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
         )
 
         # mpirun command needs an l.finalize() in the sanity check from LAMMPS 29Sep2021
