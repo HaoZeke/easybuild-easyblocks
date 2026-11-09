@@ -206,7 +206,14 @@ class EB_QuantumESPRESSO(EasyBlock):
 
         def _add_cuda(self):
             """Enable CUDA for Quantum ESPRESSO."""
-            if self.cfg.get('with_cuda', False):
+            if LooseVersion(self.version) >= LooseVersion('7.6'):
+                # QE 7.6 removed QE_ENABLE_CUDA and QE_ENABLE_OPENACC (setting them is a CMake error)
+                # in favour of QE_GPU, a list of GPU features
+                if self.cfg.get('with_cuda', False):
+                    self.cfg.update('configopts', '-DQE_GPU="openacc;cuda"')
+                else:
+                    self.cfg.update('configopts', '-DQE_GPU=""')
+            elif self.cfg.get('with_cuda', False):
                 self.cfg.update('configopts', '-DQE_ENABLE_CUDA=ON')
                 self.cfg.update('configopts', '-DQE_ENABLE_OPENACC=ON')
             else:
