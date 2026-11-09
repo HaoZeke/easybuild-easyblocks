@@ -45,11 +45,13 @@ import test.easyblocks.easyblock_specific as e
 import test.easyblocks.general as g
 import test.easyblocks.init_easyblocks as i
 import test.easyblocks.module as m
+import test.easyblocks.test_gromacs_no_hdf5 as gromacs_no_hdf5
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
     def __init__(self, loader):
-        super().__init__([x.suite(loader) for x in [g, i, m, e]])
+        # test modules without a suite() function are collected as plain unittest modules
+        super().__init__([x.suite(loader) for x in [g, i, m, e]] + [loader.loadTestsFromModule(gromacs_no_hdf5)])
 
     def run(self, *args, **kwargs):
         # initialize logger for all the unit tests
