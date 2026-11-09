@@ -75,6 +75,23 @@ def det_hdf5_configopts(gromacs_version, hdf5_root, configopts):
     return opts
 
 
+def det_no_hdf5_configopts(gromacs_version, hdf5_root, configopts):
+    """
+    Determine the CMake option that keeps HDF5 (H5MD) support off when HDF5 is not a dependency.
+
+    From 2026 onwards GROMACS enables HDF5 whenever find_package(HDF5) succeeds and GMX_USE_HDF5 is unset
+    (cmake/gmxManageHDF5.cmake), so an HDF5 found on the build host would otherwise be linked in.
+    An explicit -DGMX_USE_HDF5 in configopts is kept.
+
+    :param gromacs_version: GROMACS version (LooseVersion or string)
+    :param hdf5_root: installation prefix of the HDF5 dependency, or None if HDF5 is not a dependency
+    :param configopts: configure options already set in the easyconfig
+    """
+    if LooseVersion(str(gromacs_version)) >= '2026' and not hdf5_root and '-DGMX_USE_HDF5' not in configopts:
+        return ['-DGMX_USE_HDF5=OFF']
+    return []
+
+
 class EB_GROMACS(CMakeMake):
     """Support for building/installing GROMACS."""
 
@@ -330,6 +347,9 @@ class EB_GROMACS(CMakeMake):
 
         # Enable HDF5 support (added in v2026) if it's listed as dependency
         for opt in det_hdf5_configopts(gromacs_version, get_software_root('HDF5'), self.cfg['configopts']):
+            self.cfg.update('configopts', opt)
+        # otherwise keep it off, rather than picking up an HDF5 from the build host
+        for opt in det_no_hdf5_configopts(gromacs_version, get_software_root('HDF5'), self.cfg['configopts']):
             self.cfg.update('configopts', opt)
 
         # Ensure that the GROMACS log files report how the code was patched
