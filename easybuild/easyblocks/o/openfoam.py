@@ -202,6 +202,14 @@ class EB_OpenFOAM(EasyBlock):
             for env_var in WM_env_var:
                 regex_subs.append((r"^(setenv|export) (?P<var>%s)[ =](?P<val>.*)$" % env_var,
                                    r": ${\g<var>:=\g<val>}; export \g<var>"))
+
+            # without ParMETIS (for example when it is filtered out as a dependency) the parMetis
+            # decomposition method must not be built, since it needs parmetis.h
+            if get_software_root('ParMETIS') is None:
+                regex_subs += [
+                    (r"^export PARMETIS_TYPE=.*$", "export PARMETIS_TYPE=none"),
+                    (r"^setenv PARMETIS_TYPE .*$", "setenv PARMETIS_TYPE none"),
+                ]
             apply_regex_substitutions(script, regex_subs)
 
         # inject compiler variables into wmake/rules files
