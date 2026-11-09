@@ -45,13 +45,14 @@ import test.easyblocks.easyblock_specific as e
 import test.easyblocks.general as g
 import test.easyblocks.init_easyblocks as i
 import test.easyblocks.module as m
+import test.easyblocks.test_lammps_curl_configopts as lammps_curl
 import test.easyblocks.test_lammps_example_dry_run as lammps_dry_run
 import test.easyblocks.test_lammps_example_paths as lammps_paths
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
     def __init__(self, loader):
-        super().__init__([x.suite(loader) for x in [g, i, m, e, lammps_dry_run]])
+        super().__init__([x.suite(loader) for x in [g, i, m, e, lammps_curl, lammps_dry_run]])
         self.addTests(loader.loadTestsFromModule(lammps_paths))
 
     def run(self, *args, **kwargs):

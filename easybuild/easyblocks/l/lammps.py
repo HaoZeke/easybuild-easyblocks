@@ -138,6 +138,37 @@ def get_ld_preload_value_cuda_stubs():
     return os.pathsep.join(cuda_stub_lib_paths + ld_preload)
 
 
+def det_curl_configopts(curl_root, configopts, shlib_ext):
+    """
+    Determine the CMake options that bind libcurl to the cURL dependency.
+
+    CMake's FindCURL searches CMAKE_SYSROOT and system prefixes ahead of the dependency, so without these options
+    the libcurl header and library can come from the sysroot or the build host. A caller that sets CURL_ROOT or
+    CURL_DIR chooses the lookup itself and gets no options; any other CURL_* option in configopts is kept.
+    The library is taken from the dependency's lib or lib64 directory, preferring the shared library.
+
+    :param curl_root: installation prefix of the cURL dependency, or None if cURL is not a dependency
+    :param configopts: configure options already set in the easyconfig
+    :param shlib_ext: extension of shared libraries (e.g. 'so')
+    """
+    if not curl_root or '-DCURL_ROOT' in configopts or '-DCURL_DIR' in configopts:
+        return []
+
+    opts = []
+    if '-DCURL_NO_CURL_CMAKE' not in configopts:
+        opts.append('-DCURL_NO_CURL_CMAKE=ON')
+    include_dir = os.path.join(curl_root, 'include')
+    if '-DCURL_INCLUDE_DIR' not in configopts and os.path.isfile(os.path.join(include_dir, 'curl', 'curl.h')):
+        opts.append('-DCURL_INCLUDE_DIR=%s' % include_dir)
+    if '-DCURL_LIBRARY' not in configopts:
+        candidates = [os.path.join(curl_root, libdir, 'libcurl.' + ext)
+                      for ext in (shlib_ext, 'a') for libdir in ('lib', 'lib64')]
+        library = next((path for path in candidates if os.path.isfile(path)), None)
+        if library:
+            opts.append('-DCURL_LIBRARY=%s' % library)
+    return opts
+
+
 def lammps_example_input(installdir, check_file, dry_run=False):
     """Locate installed examples, or report their conventional paths in a dry run."""
     name = os.path.basename(check_file)
@@ -422,6 +453,10 @@ class EB_LAMMPS(CMakeMake):
                 self.cfg.update('configopts', '-DEIGEN3_INCLUDE_DIR=%s/include/Eigen' % get_software_root('Eigen'))
             if '-DEigen3_DIR=' not in self.cfg['configopts']:
                 self.cfg.update('configopts', '-DEigen3_DIR=%s/share/eigen3/cmake/' % get_software_root('Eigen'))
+
+        # libcurl (geturl command, KIM) comes from the cURL dependency, not from the sysroot or the build host
+        for opt in det_curl_configopts(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext()):
+            self.cfg.update('configopts', opt)
 
         # LAMMPS Configuration Options
         # https://docs.lammps.org/Build_basics.html
