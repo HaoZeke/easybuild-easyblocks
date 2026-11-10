@@ -753,6 +753,55 @@ class EasyBlockSpecificTest(TestCase):
 
         self.assertEqual(lammps.translate_lammps_version('d3adb33f', path=self.tmpdir), '2025.04.02.3')
 
+    def test_pytorch_prepare_step_cmake(self):
+        """Test which CMake versions PyTorch's prepare_step accepts and when it adds a cmake3 alias."""
+        orig_prepare_step = pythonpackage.PythonPackage.prepare_step
+
+        def check(pytorch_version, cmake_version, with_cmake3=False):
+            ec_path = os.path.join(self.tmpdir, f'PyTorch-{pytorch_version}-{cmake_version}.eb')
+            write_file(ec_path, '\n'.join([
+                "easyblock = 'EB_PyTorch'",
+                "name = 'PyTorch'",
+                f"version = '{pytorch_version}'",
+                "homepage = 'https://pytorch.org/'",
+                "description = 'test'",
+                "toolchain = SYSTEM",
+                "moduleclass = 'ai'",
+            ]))
+            cmake_root = os.path.join(self.tmpdir, f'CMake-{cmake_version}')
+            write_file(os.path.join(cmake_root, 'bin', 'cmake'), '#!/bin/sh\n')
+            if with_cmake3:
+                write_file(os.path.join(cmake_root, 'bin', 'cmake3'), '#!/bin/sh\n')
+            os.environ['EBROOTCMAKE'] = cmake_root
+            os.environ['EBVERSIONCMAKE'] = cmake_version
+            os.environ['PATH'] = self.orig_environ['PATH']
+            eb = get_easyblock_instance(process_easyconfig(ec_path)[0])
+            eb.prepare_step()
+            cmake3 = [os.path.join(d, 'cmake3') for d in os.environ['PATH'].split(os.pathsep)
+                      if d.endswith('cmake-bin') and os.path.islink(os.path.join(d, 'cmake3'))]
+            return [os.path.realpath(p) for p in cmake3]
+
+        # only the CMake handling of EB_PyTorch is tested, not the generic preparation (toolchain, dependencies)
+        pythonpackage.PythonPackage.prepare_step = lambda self, *args, **kwargs: None
+        try:
+            # PyTorch >= 2.7 supports CMake 4 (pytorch/pytorch#150203) and picks the newest of cmake/cmake3 on
+            # $PATH, so no cmake3 alias is needed (or added) for CMake 4.x
+            self.assertEqual(check('2.10.0', '4.2.1'), [])
+            self.assertEqual(check('2.7.0', '4.0.2'), [])
+            # older PyTorch releases still require CMake 3
+            error_pattern = 'PyTorch requires CMake 3 but CMake 4.2.1 was found'
+            self.assertRaisesRegex(EasyBuildError, error_pattern, check, '2.6.0', '4.2.1')
+            self.assertRaisesRegex(EasyBuildError, "PyTorch requires CMake 3 but CMake 2.8.12 was found",
+                                   check, '2.10.0', '2.8.12')
+            # CMake 3 without cmake3 binary: alias pointing to CMake's cmake is put in front of $PATH
+            cmake_3 = os.path.join(self.tmpdir, 'CMake-3.31.6', 'bin', 'cmake')
+            self.assertEqual(check('2.10.0', '3.31.6'), [os.path.realpath(cmake_3)])
+            self.assertEqual(check('2.6.0', '3.31.6'), [os.path.realpath(cmake_3)])
+            # a CMake installation that provides cmake3 itself is used as is
+            self.assertEqual(check('2.6.0', '4.2.1', with_cmake3=True), [])
+        finally:
+            pythonpackage.PythonPackage.prepare_step = orig_prepare_step
+
     def test_pytorch_test_log_parsing(self):
         """Verify parsing of XML files produced by PyTorch tests."""
         TestState = pytorch.TestState
