@@ -54,11 +54,143 @@ from easybuild.tools.systemtools import get_avail_core_count, get_cpu_architectu
 from easybuild.tools.toolchain.compiler import OPTARCH_GENERIC
 
 from easybuild.easyblocks.generic.cmakemake import CMakeMake
+from easybuild.easyblocks.openssl import GENERIC_SSL_CERTS_DIR
 
 # lammps version, which caused the most changes. This may not be precise, but it does work with existing easyconfigs
 ref_version = '29Sep2021'
 
 _log = fancylogger.getLogger('easyblocks.lammps')
+
+# Public host CAfile candidates (runtime discovery on the user's host; not a build-host bake-in).
+# Reuses the OpenSSL easyblock's GENERIC_SSL_CERTS_DIR for the Debian/Ubuntu bundle location.
+HOST_CA_BUNDLE_CANDIDATES = (
+    os.path.join(GENERIC_SSL_CERTS_DIR, 'ca-certificates.crt'),
+    '/etc/pki/tls/certs/ca-bundle.crt',
+    '/etc/ssl/ca-bundle.pem',
+    '/etc/pki/tls/cacert.pem',
+    '/etc/ssl/cert.pem',
+)
+
+
+def _nonempty_env_value(environ, name):
+    """Return environ[name] when set to a non-empty string, else None."""
+    value = environ.get(name)
+    if value is None or value == '':
+        return None
+    return value
+
+
+def det_host_ca_bundle(environ=None, isfile=os.path.isfile):
+    """
+    Resolve a CAfile for libcurl / geturl without baking a build-host path.
+
+    Precedence:
+    1. Explicit non-empty CURL_CA_BUNDLE (preserved even if the path is invalid)
+    2. Non-empty SSL_CERT_FILE (optional supported fallback; also preserved if invalid)
+    3. First existing public host CAfile from HOST_CA_BUNDLE_CANDIDATES
+    """
+    if environ is None:
+        environ = os.environ
+    explicit = _nonempty_env_value(environ, 'CURL_CA_BUNDLE')
+    if explicit is not None:
+        return explicit
+    ssl_cert_file = _nonempty_env_value(environ, 'SSL_CERT_FILE')
+    if ssl_cert_file is not None:
+        return ssl_cert_file
+    for path in HOST_CA_BUNDLE_CANDIDATES:
+        if isfile(path):
+            return path
+    return None
+
+
+def ensure_lammps_curl_ca_bundle(environ=None):
+    """
+    Ensure CURL_CA_BUNDLE is set for the LAMMPS test/runtime process when the caller
+    has not chosen one. Does not override a non-empty CURL_CA_BUNDLE.
+    """
+    owns_environ = environ is None
+    if owns_environ:
+        environ = os.environ
+    if _nonempty_env_value(environ, 'CURL_CA_BUNDLE') is not None:
+        return environ.get('CURL_CA_BUNDLE')
+    resolved = det_host_ca_bundle(environ)
+    if resolved is not None:
+        if owns_environ:
+            env.setvar('CURL_CA_BUNDLE', resolved)
+        else:
+            environ['CURL_CA_BUNDLE'] = resolved
+    return resolved
+
+
+def lammps_curl_ca_bundle_module_statements(module_generator):
+    """
+    Module statements that set CURL_CA_BUNDLE via pushenv with host-local discovery.
+
+    Uses the moduletool pushenv primitive (same as ModuleGenerator.set_environment with
+    pushenv=True) so load/unload restores the prior environment. Candidate paths are
+    evaluated when the module is loaded on the user's host, not at build time.
+    """
+    candidates = HOST_CA_BUNDLE_CANDIDATES
+    syntax = getattr(module_generator, 'SYNTAX', None)
+    if syntax == 'Lua':
+        cand_lua = ',\n      '.join('"%s"' % path for path in candidates)
+        return '\n'.join([
+            '-- EasyBuild LAMMPS: set CURL_CA_BUNDLE from host trust store when unset',
+            'do',
+            '  local function _eb_lammps_nonempty(v)',
+            '    return v ~= nil and v ~= ""',
+            '  end',
+            '  local function _eb_lammps_first_host_ca()',
+            '    local candidates = {',
+            '      %s' % cand_lua,
+            '    }',
+            '    for i = 1, #candidates do',
+            '      if isFile(candidates[i]) then',
+            '        return candidates[i]',
+            '      end',
+            '    end',
+            '    return nil',
+            '  end',
+            '  local resolved = nil',
+            '  if _eb_lammps_nonempty(os.getenv("CURL_CA_BUNDLE")) then',
+            '    resolved = os.getenv("CURL_CA_BUNDLE")',
+            '  elseif _eb_lammps_nonempty(os.getenv("SSL_CERT_FILE")) then',
+            '    resolved = os.getenv("SSL_CERT_FILE")',
+            '  else',
+            '    resolved = _eb_lammps_first_host_ca()',
+            '  end',
+            '  if _eb_lammps_nonempty(resolved) then',
+            '    pushenv("CURL_CA_BUNDLE", resolved)',
+            '  end',
+            'end',
+            '',
+        ])
+    if syntax == 'Tcl':
+        cand_tcl = ' '.join(candidates)
+        return '\n'.join([
+            '# EasyBuild LAMMPS: set CURL_CA_BUNDLE from host trust store when unset',
+            'set _eb_lammps_curl_ca ""',
+            'if {[info exists ::env(CURL_CA_BUNDLE)] && $::env(CURL_CA_BUNDLE) ne ""} {',
+            '  set _eb_lammps_curl_ca $::env(CURL_CA_BUNDLE)',
+            '} elseif {[info exists ::env(SSL_CERT_FILE)] && $::env(SSL_CERT_FILE) ne ""} {',
+            '  set _eb_lammps_curl_ca $::env(SSL_CERT_FILE)',
+            '} else {',
+            '  foreach _eb_lammps_cand {%s} {' % cand_tcl,
+            '    if {[file isfile $_eb_lammps_cand]} {',
+            '      set _eb_lammps_curl_ca $_eb_lammps_cand',
+            '      break',
+            '    }',
+            '  }',
+            '}',
+            'if {$_eb_lammps_curl_ca ne ""} {',
+            '  pushenv CURL_CA_BUNDLE $_eb_lammps_curl_ca',
+            '}',
+            'unset -nocomplain _eb_lammps_curl_ca _eb_lammps_cand',
+            '',
+        ])
+    module_generator.log.warning(
+        "Unsupported module syntax %r for LAMMPS CURL_CA_BUNDLE statements; skipping", syntax)
+    return ''
 
 
 def translate_lammps_version(version, path=None):
@@ -743,6 +875,10 @@ class EB_LAMMPS(CMakeMake):
 
     def test_step(self):
         """Filter the ctests that should be run"""
+        # Provide a host-trusted CAfile when the caller has not chosen CURL_CA_BUNDLE,
+        # so geturl/libcurl TLS checks during tests use the public trust store.
+        ensure_lammps_curl_ca_bundle()
+
         # add flags to test_cmd to ignore some tests
         if self.cfg.get('runtest') is True and not self.cfg.get('test_cmd'):
             test_cmd = 'ctest'
@@ -765,6 +901,12 @@ class EB_LAMMPS(CMakeMake):
                     env.setvar('OMPI_MCA_rmaps_base_oversubscribe', '1')
 
         super().test_step()
+
+    def make_module_extra(self, *args, **kwargs):
+        """Add portable CURL_CA_BUNDLE pushenv discovery to the generated module."""
+        txt = super().make_module_extra(*args, **kwargs)
+        txt += lammps_curl_ca_bundle_module_statements(self.module_generator)
+        return txt
 
     def sanity_check_step(self, *args, **kwargs):
         """Run custom sanity checks for LAMMPS files, dirs and commands."""
