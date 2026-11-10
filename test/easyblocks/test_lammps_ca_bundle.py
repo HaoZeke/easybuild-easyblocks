@@ -2,9 +2,7 @@
 Additive controls for LAMMPS CURL_CA_BUNDLE host CA discovery and module pushenv text.
 """
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from easybuild.easyblocks.l.lammps import (
