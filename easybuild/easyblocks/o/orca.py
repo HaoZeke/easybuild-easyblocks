@@ -46,13 +46,14 @@ from easybuild.tools.systemtools import X86_64, get_cpu_architecture
 
 
 ORCA_PT_LOAD = 1
+ORCA_PT_INTERP = 3
 ORCA_ET_EXEC = 2
 ORCA_MIN_LOAD_VADDR = 0x10000
 ORCA_MAX_LOAD_ALIGNMENT = 0x200000
 
 
-def orca_elf_load_info(path):
-    """Return the ELF type and (offset, virtual address, alignment) of its load segments."""
+def _orca_elf_info(path):
+    """Read the ELF type, load segments and optional program interpreter."""
     try:
         with open(path, 'rb') as stream:
             ident = stream.read(16)
@@ -61,22 +62,46 @@ def orca_elf_load_info(path):
                 raise EasyBuildError("Unsupported ELF header in %s", path)
             endian = '<' if ident[5] == 1 else '>'
             if ident[4] == 2:
-                ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIQQQIHHH', endian + 'IIQQQQQQ', 2, 3
+                ehdr, phdr, offset_idx, vaddr_idx, size_idx = endian + 'HHIQQQIHHH', endian + 'IIQQQQQQ', 2, 3, 5
             else:
-                ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIIIIIHHH', endian + 'IIIIIIII', 1, 2
+                ehdr, phdr, offset_idx, vaddr_idx, size_idx = endian + 'HHIIIIIHHH', endian + 'IIIIIIII', 1, 2, 4
             header = struct.unpack(ehdr, stream.read(struct.calcsize(ehdr)))
             phoff, phentsize, phnum = header[4], header[8], header[9]
             if phentsize < struct.calcsize(phdr):
                 raise EasyBuildError("Unsupported ELF program header size in %s", path)
             segments = []
+            interpreter = None
             for index in range(phnum):
                 stream.seek(phoff + index * phentsize)
                 entry = struct.unpack(phdr, stream.read(struct.calcsize(phdr)))
                 if entry[0] == ORCA_PT_LOAD:
                     segments.append((entry[offset_idx], entry[vaddr_idx], entry[7]))
-            return header[0], segments
+                elif entry[0] == ORCA_PT_INTERP:
+                    if interpreter is not None:
+                        raise EasyBuildError("Multiple ELF interpreters in %s", path)
+                    stream.seek(entry[offset_idx])
+                    value = stream.read(entry[size_idx])
+                    if len(value) != entry[size_idx] or not value.endswith(b'\0'):
+                        raise EasyBuildError("Invalid ELF interpreter in %s", path)
+                    value = value.rstrip(b'\0')
+                    if b'\0' in value:
+                        raise EasyBuildError("Invalid ELF interpreter in %s", path)
+                    interpreter = os.fsdecode(value)
+                    if not os.path.isabs(interpreter):
+                        raise EasyBuildError("Invalid ELF interpreter in %s: %s", path, interpreter)
+            return header[0], segments, interpreter
     except (OSError, struct.error) as err:
-        raise EasyBuildError("Failed to read ELF load segments in %s: %s", path, err)
+        raise EasyBuildError("Failed to read ELF program headers in %s: %s", path, err)
+
+
+def orca_elf_load_info(path):
+    """Return the ELF type and (offset, virtual address, alignment) of its load segments."""
+    return _orca_elf_info(path)[:2]
+
+
+def orca_elf_interpreter(path):
+    """Return PT_INTERP for a dynamic executable, or None for an ELF without it."""
+    return _orca_elf_info(path)[2]
 
 
 def orca_permanent_rpaths(rpath, excluded_roots):
@@ -187,6 +212,7 @@ class EB_ORCA(PackedBinary, MakeCp):
 
     def _toolchain_mpi_rpath(self):
         """Link an MPI probe with the active wrappers without executing it."""
+        self._mpi_interpreter = None
         compiler = os.environ.get('MPICC')
         if not compiler:
             raise EasyBuildError("MPICC is required to determine the active MPI runtime RPATH")
@@ -206,6 +232,13 @@ class EB_ORCA(PackedBinary, MakeCp):
         entries = orca_permanent_rpaths(rpath, excluded)
         if not entries:
             raise EasyBuildError("The active MPI compiler did not provide permanent RPATH entries")
+        if any(os.path.isfile(os.path.join(entry, 'libc.so.6')) for entry in entries):
+            # A selected libc and its ELF interpreter form one runtime.
+            interpreter = orca_elf_interpreter(executable)
+            if (not interpreter or orca_permanent_rpaths(interpreter, excluded) != [interpreter]
+                    or not os.path.isfile(interpreter)):
+                raise EasyBuildError("The active MPI compiler did not provide a permanent ELF interpreter")
+            self._mpi_interpreter = interpreter
         return entries
 
     def _append_mpi_rpath(self, path, additions):
@@ -218,7 +251,10 @@ class EB_ORCA(PackedBinary, MakeCp):
             if addition not in entries:
                 entries.append(addition)
         dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
-        if entries == original and '(RPATH)' in dynamic:
+        interpreter = getattr(self, '_mpi_interpreter', None)
+        current_interpreter = orca_elf_interpreter(path) if interpreter else None
+        replace_interpreter = current_interpreter is not None and current_interpreter != interpreter
+        if entries == original and '(RPATH)' in dynamic and not replace_interpreter:
             return
 
         elf_type, segments = orca_elf_load_info(path)
@@ -229,14 +265,18 @@ class EB_ORCA(PackedBinary, MakeCp):
         fixed_address = elf_type == ORCA_ET_EXEC
         # A large page size can place a fixed-address image's grown string table on page zero.
         page_size = '--page-size %d ' % alignment if alignment > 0x1000 and not fixed_address else ''
-        run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s" %
-                      (page_size, shlex.quote(':'.join(entries)), quoted_path), hidden=True)
+        interpreter_option = '--set-interpreter %s ' % shlex.quote(interpreter) if replace_interpreter else ''
+        run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s%s" %
+                      (page_size, shlex.quote(':'.join(entries)), interpreter_option, quoted_path), hidden=True)
         recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
         if recorded.split(':') != entries:
             raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
         dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
         if '(RPATH)' not in dynamic:
             raise EasyBuildError("DT_RPATH was not recorded for %s", path)
+        expected_interpreter = interpreter if current_interpreter is not None else None
+        if interpreter and orca_elf_interpreter(path) != expected_interpreter:
+            raise EasyBuildError("ELF interpreter was not preserved in %s: %s", path, expected_interpreter)
         patched_type, patched_segments = orca_elf_load_info(path)
         if patched_type != elf_type or not patched_segments:
             raise EasyBuildError("ELF load structure was not preserved in %s", path)
