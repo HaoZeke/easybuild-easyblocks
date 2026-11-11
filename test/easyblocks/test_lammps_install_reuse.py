@@ -8,12 +8,14 @@ from unittest import mock
 from easybuild.easyblocks.generic.cmakemake import CMakeMake
 from easybuild.easyblocks.l.lammps import EB_LAMMPS, translate_lammps_version
 from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.config import init_build_options
 
 
 class LammpsInstallReuse(unittest.TestCase):
     """Exercise installation copies against real fresh and populated directories."""
 
     def setUp(self):
+        init_build_options()
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -80,7 +82,7 @@ class LammpsInstallReuse(unittest.TestCase):
                 (self.install / name).mkdir(parents=True)
                 marker = self.install / name / 'retained.txt'
                 marker.write_text('retained content\n')
-                with self.assertRaises(EasyBuildError):
+                with self.assertRaisesRegex(EasyBuildError, 'Target location .* already exists'):
                     self.install_step(False)
                 self.assertEqual(marker.read_text(), 'retained content\n')
 
