@@ -935,9 +935,11 @@ class EB_LAMMPS(CMakeMake):
         # Copy over the examples so we can repeat the sanity check
         # (some symlinks may be broken)
         examples_dir = os.path.join(self.start_dir, 'examples')
-        copy_dir(examples_dir, os.path.join(self.installdir, 'examples'), symlinks=True)
+        copy_dir(examples_dir, os.path.join(self.installdir, 'examples'), symlinks=True,
+                 dirs_exist_ok=self.cfg['keeppreviousinstall'])
         potentials_dir = os.path.join(self.start_dir, 'potentials')
-        copy_dir(potentials_dir, os.path.join(self.installdir, 'potentials'))
+        copy_dir(potentials_dir, os.path.join(self.installdir, 'potentials'),
+                 dirs_exist_ok=self.cfg['keeppreviousinstall'])
 
         if LooseVersion(self.cur_version) >= LooseVersion(translate_lammps_version('2Aug2023')):
             # From ver 2Aug2023:
