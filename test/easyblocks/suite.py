@@ -45,11 +45,27 @@ import test.easyblocks.easyblock_specific as e
 import test.easyblocks.general as g
 import test.easyblocks.init_easyblocks as i
 import test.easyblocks.module as m
+import test.easyblocks.test_lammps_ca_bundle as component_lammps_ca_bundle
+import test.easyblocks.test_lammps_curl_configopts as component_lammps_curl_configopts
+import test.easyblocks.test_lammps_curl_linking as component_lammps_curl_linking
+import test.easyblocks.test_lammps_example_dry_run as component_lammps_example_dry_run
+import test.easyblocks.test_lammps_example_paths as component_lammps_example_paths
+import test.easyblocks.test_lammps_example_symlinks as component_lammps_example_symlinks
+import test.easyblocks.test_lammps_install_reuse as component_lammps_install_reuse
+import test.easyblocks.test_lammps_kokkos_cleanup as component_lammps_kokkos_cleanup
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
     def __init__(self, loader):
         super().__init__([x.suite(loader) for x in [g, i, m, e]])
+        self.addTests(loader.loadTestsFromModule(component_lammps_ca_bundle))
+        self.addTests(loader.loadTestsFromModule(component_lammps_curl_configopts))
+        self.addTests(loader.loadTestsFromModule(component_lammps_curl_linking))
+        self.addTests(loader.loadTestsFromModule(component_lammps_example_dry_run))
+        self.addTests(loader.loadTestsFromModule(component_lammps_example_paths))
+        self.addTests(loader.loadTestsFromModule(component_lammps_example_symlinks))
+        self.addTests(loader.loadTestsFromModule(component_lammps_install_reuse))
+        self.addTests(loader.loadTestsFromModule(component_lammps_kokkos_cleanup))
 
     def run(self, *args, **kwargs):
         # initialize logger for all the unit tests

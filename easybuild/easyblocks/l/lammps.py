@@ -33,6 +33,7 @@
 import glob
 import os
 import re
+import shlex
 import tempfile
 import copy
 from easybuild.tools import LooseVersion
@@ -54,11 +55,143 @@ from easybuild.tools.systemtools import get_avail_core_count, get_cpu_architectu
 from easybuild.tools.toolchain.compiler import OPTARCH_GENERIC
 
 from easybuild.easyblocks.generic.cmakemake import CMakeMake
+from easybuild.easyblocks.openssl import GENERIC_SSL_CERTS_DIR
 
 # lammps version, which caused the most changes. This may not be precise, but it does work with existing easyconfigs
 ref_version = '29Sep2021'
 
 _log = fancylogger.getLogger('easyblocks.lammps')
+
+# Public host CAfile candidates (runtime discovery on the user's host; not a build-host bake-in).
+# Reuses the OpenSSL easyblock's GENERIC_SSL_CERTS_DIR for the Debian/Ubuntu bundle location.
+HOST_CA_BUNDLE_CANDIDATES = (
+    os.path.join(GENERIC_SSL_CERTS_DIR, 'ca-certificates.crt'),
+    '/etc/pki/tls/certs/ca-bundle.crt',
+    '/etc/ssl/ca-bundle.pem',
+    '/etc/pki/tls/cacert.pem',
+    '/etc/ssl/cert.pem',
+)
+
+
+def _nonempty_env_value(environ, name):
+    """Return environ[name] when set to a non-empty string, else None."""
+    value = environ.get(name)
+    if value is None or value == '':
+        return None
+    return value
+
+
+def det_host_ca_bundle(environ=None, isfile=os.path.isfile):
+    """
+    Resolve a CAfile for libcurl / geturl without baking a build-host path.
+
+    Precedence:
+    1. Explicit non-empty CURL_CA_BUNDLE (preserved even if the path is invalid)
+    2. Non-empty SSL_CERT_FILE (optional supported fallback; also preserved if invalid)
+    3. First existing public host CAfile from HOST_CA_BUNDLE_CANDIDATES
+    """
+    if environ is None:
+        environ = os.environ
+    explicit = _nonempty_env_value(environ, 'CURL_CA_BUNDLE')
+    if explicit is not None:
+        return explicit
+    ssl_cert_file = _nonempty_env_value(environ, 'SSL_CERT_FILE')
+    if ssl_cert_file is not None:
+        return ssl_cert_file
+    for path in HOST_CA_BUNDLE_CANDIDATES:
+        if isfile(path):
+            return path
+    return None
+
+
+def ensure_lammps_curl_ca_bundle(environ=None):
+    """
+    Ensure CURL_CA_BUNDLE is set for the LAMMPS test/runtime process when the caller
+    has not chosen one. Does not override a non-empty CURL_CA_BUNDLE.
+    """
+    owns_environ = environ is None
+    if owns_environ:
+        environ = os.environ
+    if _nonempty_env_value(environ, 'CURL_CA_BUNDLE') is not None:
+        return environ.get('CURL_CA_BUNDLE')
+    resolved = det_host_ca_bundle(environ)
+    if resolved is not None:
+        if owns_environ:
+            env.setvar('CURL_CA_BUNDLE', resolved)
+        else:
+            environ['CURL_CA_BUNDLE'] = resolved
+    return resolved
+
+
+def lammps_curl_ca_bundle_module_statements(module_generator):
+    """
+    Module statements that set CURL_CA_BUNDLE via pushenv with host-local discovery.
+
+    Uses the moduletool pushenv primitive (same as ModuleGenerator.set_environment with
+    pushenv=True) so load/unload restores the prior environment. Candidate paths are
+    evaluated when the module is loaded on the user's host, not at build time.
+    """
+    candidates = HOST_CA_BUNDLE_CANDIDATES
+    syntax = getattr(module_generator, 'SYNTAX', None)
+    if syntax == 'Lua':
+        cand_lua = ',\n      '.join('"%s"' % path for path in candidates)
+        return '\n'.join([
+            '-- EasyBuild LAMMPS: set CURL_CA_BUNDLE from host trust store when unset',
+            'do',
+            '  local function _eb_lammps_nonempty(v)',
+            '    return v ~= nil and v ~= ""',
+            '  end',
+            '  local function _eb_lammps_first_host_ca()',
+            '    local candidates = {',
+            '      %s' % cand_lua,
+            '    }',
+            '    for i = 1, #candidates do',
+            '      if isFile(candidates[i]) then',
+            '        return candidates[i]',
+            '      end',
+            '    end',
+            '    return nil',
+            '  end',
+            '  local resolved = nil',
+            '  if _eb_lammps_nonempty(os.getenv("CURL_CA_BUNDLE")) then',
+            '    resolved = os.getenv("CURL_CA_BUNDLE")',
+            '  elseif _eb_lammps_nonempty(os.getenv("SSL_CERT_FILE")) then',
+            '    resolved = os.getenv("SSL_CERT_FILE")',
+            '  else',
+            '    resolved = _eb_lammps_first_host_ca()',
+            '  end',
+            '  if _eb_lammps_nonempty(resolved) then',
+            '    pushenv("CURL_CA_BUNDLE", resolved)',
+            '  end',
+            'end',
+            '',
+        ])
+    if syntax == 'Tcl':
+        cand_tcl = ' '.join(candidates)
+        return '\n'.join([
+            '# EasyBuild LAMMPS: set CURL_CA_BUNDLE from host trust store when unset',
+            'set _eb_lammps_curl_ca ""',
+            'if {[info exists ::env(CURL_CA_BUNDLE)] && $::env(CURL_CA_BUNDLE) ne ""} {',
+            '  set _eb_lammps_curl_ca $::env(CURL_CA_BUNDLE)',
+            '} elseif {[info exists ::env(SSL_CERT_FILE)] && $::env(SSL_CERT_FILE) ne ""} {',
+            '  set _eb_lammps_curl_ca $::env(SSL_CERT_FILE)',
+            '} else {',
+            '  foreach _eb_lammps_cand {%s} {' % cand_tcl,
+            '    if {[file isfile $_eb_lammps_cand]} {',
+            '      set _eb_lammps_curl_ca $_eb_lammps_cand',
+            '      break',
+            '    }',
+            '  }',
+            '}',
+            'if {$_eb_lammps_curl_ca ne ""} {',
+            '  pushenv CURL_CA_BUNDLE $_eb_lammps_curl_ca',
+            '}',
+            'unset -nocomplain _eb_lammps_curl_ca _eb_lammps_cand',
+            '',
+        ])
+    module_generator.log.warning(
+        "Unsupported module syntax %r for LAMMPS CURL_CA_BUNDLE statements; skipping", syntax)
+    return ''
 
 
 def translate_lammps_version(version, path=None):
@@ -136,6 +269,142 @@ def get_ld_preload_value_cuda_stubs():
                 raise EasyBuildError(f"CUDA stub library at {path} does not exist!")
 
     return os.pathsep.join(cuda_stub_lib_paths + ld_preload)
+
+
+def det_curl_configopts(curl_root, configopts, shlib_ext):
+    """
+    Determine the CMake options that bind libcurl to the cURL dependency.
+
+    CMake's FindCURL searches CMAKE_SYSROOT and system prefixes ahead of the dependency, so without these options
+    the libcurl header and library can come from the sysroot or the build host. A caller that sets CURL_ROOT or
+    CURL_DIR chooses the lookup itself and gets no options; any other CURL_* option in configopts is kept.
+    The library is taken from the dependency's lib or lib64 directory, preferring the shared library.
+
+    :param curl_root: installation prefix of the cURL dependency, or None if cURL is not a dependency
+    :param configopts: configure options already set in the easyconfig
+    :param shlib_ext: extension of shared libraries (e.g. 'so')
+    """
+    if not curl_root or '-DCURL_ROOT' in configopts or '-DCURL_DIR' in configopts:
+        return []
+
+    opts = []
+    if '-DCURL_NO_CURL_CMAKE' not in configopts:
+        opts.append('-DCURL_NO_CURL_CMAKE=ON')
+    include_dir = os.path.join(curl_root, 'include')
+    if '-DCURL_INCLUDE_DIR' not in configopts and os.path.isfile(os.path.join(include_dir, 'curl', 'curl.h')):
+        opts.append('-DCURL_INCLUDE_DIR=%s' % include_dir)
+    if '-DCURL_LIBRARY' not in configopts:
+        candidates = [os.path.join(curl_root, libdir, 'libcurl.' + ext)
+                      for ext in (shlib_ext, 'a') for libdir in ('lib', 'lib64')]
+        library = next((path for path in candidates if os.path.isfile(path)), None)
+        if library:
+            opts.append('-DCURL_LIBRARY=%s' % library)
+    return opts
+
+
+def _cmake_definitions(configopts):
+    """Read effective -D definitions without changing caller-supplied CMake options."""
+    definitions = {}
+    tokens = iter(shlex.split(configopts))
+    for token in tokens:
+        if token == '-D':
+            definition = next(tokens, '')
+        elif token.startswith('-D'):
+            definition = token[2:]
+        else:
+            continue
+        name, separator, value = definition.partition('=')
+        if separator:
+            definitions[name.split(':', 1)[0]] = value
+    return definitions
+
+
+def det_curl_libdir(curl_root, configopts, shlib_ext):
+    """Locate the selected shared curl library without overriding an explicit package lookup."""
+    definitions = _cmake_definitions(configopts)
+    if 'CURL_ROOT' in definitions or 'CURL_DIR' in definitions:
+        return None
+    library = definitions.get('CURL_LIBRARY')
+    if library is None:
+        configurations = ['RELEASE', 'DEBUG']
+        if definitions.get('CMAKE_BUILD_TYPE', '').lower() == 'debug':
+            configurations.reverse()
+        for configuration in configurations:
+            key = 'CURL_LIBRARY_' + configuration
+            if key in definitions:
+                library = definitions[key]
+                break
+    if library is None and curl_root:
+        candidates = [os.path.join(curl_root, subdir, 'libcurl.' + shlib_ext) for subdir in ('lib', 'lib64')]
+        library = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+    if (library and os.path.isabs(library) and os.path.isfile(library)
+            and re.search(r'\.%s(?:\.[0-9]+)*$' % re.escape(shlib_ext), library)):
+        return os.path.dirname(library)
+    return None
+
+
+def det_lammps_exe_linker_flags(configopts, rpath_link_dirs, default_flags=''):
+    """Merge runtime dependency lookup paths with the effective executable linker flags."""
+    flags = _cmake_definitions(configopts).get('CMAKE_EXE_LINKER_FLAGS', default_flags)
+    existing = shlex.split(flags)
+    additions = []
+    for directory in rpath_link_dirs:
+        flag = '-Wl,-rpath-link,' + directory
+        if flag not in existing and flag not in additions:
+            additions.append(flag)
+    if not additions:
+        return None
+    combined = ' '.join(shlex.quote(flag) for flag in additions)
+    if flags:
+        combined += ' ' + flags
+    return '-DCMAKE_EXE_LINKER_FLAGS:STRING=' + shlex.quote(combined)
+
+
+def lammps_example_input(installdir, check_file, dry_run=False):
+    """Locate installed examples, or report their conventional paths in a dry run."""
+    name = os.path.basename(check_file)
+    example = os.path.join(installdir, 'examples', check_file, 'in.' + name)
+    if os.path.isfile(example):
+        return example
+    if check_file in ('hugoniostat', 'msst'):
+        nested = os.path.join(installdir, 'examples', 'PACKAGES', 'shock', name, 'in.' + name)
+        if os.path.isfile(nested):
+            return nested
+    if dry_run:
+        return example
+    raise EasyBuildError("Could not find installed LAMMPS sanity input for %s", check_file)
+
+
+def copy_lammps_examples(source, destination, dirs_exist_ok=False):
+    """Merge examples while preserving source links and refusing linked directories."""
+    if build_option('extended_dry_run') or not dirs_exist_ok or not os.path.lexists(destination):
+        copy_dir(source, destination, symlinks=True, dirs_exist_ok=dirs_exist_ok)
+        return
+
+    if os.path.islink(destination) or not os.path.isdir(destination):
+        raise EasyBuildError("LAMMPS examples destination must be a real directory: %s", destination)
+
+    for name in os.listdir(source):
+        source_entry = os.path.join(source, name)
+        destination_entry = os.path.join(destination, name)
+        if os.path.islink(source_entry):
+            link = os.readlink(source_entry)
+            if os.path.islink(destination_entry) and os.readlink(destination_entry) == link:
+                continue
+            if os.path.lexists(destination_entry):
+                if os.path.isdir(destination_entry) and not os.path.islink(destination_entry):
+                    raise EasyBuildError("Cannot replace examples directory with a symbolic link: %s",
+                                         destination_entry)
+                os.unlink(destination_entry)
+            os.symlink(link, destination_entry)
+        elif os.path.isdir(source_entry):
+            copy_lammps_examples(source_entry, destination_entry, dirs_exist_ok=True)
+        else:
+            if os.path.islink(destination_entry):
+                os.unlink(destination_entry)
+            elif os.path.isdir(destination_entry):
+                raise EasyBuildError("Cannot replace examples directory with a file: %s", destination_entry)
+            copy_file(source_entry, destination_entry)
 
 
 class EB_LAMMPS(CMakeMake):
@@ -293,9 +562,35 @@ class EB_LAMMPS(CMakeMake):
         })
         return extra_vars
 
+    def _prepare_curl_rpath(self, *args, **kwargs):
+        """Create RPATH wrappers with the selected curl after dependency modules are loaded."""
+        options = self.toolchain.options
+        use_rpath = build_option('rpath') and options.get('rpath', True)
+        if use_rpath:
+            has_rpath_option = 'rpath' in options
+            original_rpath = options.get('rpath')
+            options['rpath'] = False
+            try:
+                super().prepare_step(*args, **kwargs)
+            finally:
+                if has_rpath_option:
+                    options['rpath'] = original_rpath
+                else:
+                    del options['rpath']
+            curl_libdir = det_curl_libdir(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext())
+            if curl_libdir and curl_libdir not in self.rpath_include_dirs:
+                self.rpath_include_dirs.append(curl_libdir)
+            self.toolchain.prepare_rpath_wrappers(rpath_filter_dirs=self.rpath_filter_dirs,
+                                                  rpath_include_dirs=self.rpath_include_dirs,
+                                                  rpath_wrappers_dir=self.rpath_wrappers_dir)
+            self.toolchain.use_rpath = True
+            self.cached_build_env = env.copy_current_env()
+        else:
+            super().prepare_step(*args, **kwargs)
+
     def prepare_step(self, *args, **kwargs):
         """Custom prepare step for LAMMPS."""
-        super().prepare_step(*args, **kwargs)
+        self._prepare_curl_rpath(*args, **kwargs)
 
         # version 1.3.2 is used in the test suite to check easyblock can be initialised
         if self.version != '1.3.2':
@@ -407,6 +702,10 @@ class EB_LAMMPS(CMakeMake):
                 self.cfg.update('configopts', '-DEIGEN3_INCLUDE_DIR=%s/include/Eigen' % get_software_root('Eigen'))
             if '-DEigen3_DIR=' not in self.cfg['configopts']:
                 self.cfg.update('configopts', '-DEigen3_DIR=%s/share/eigen3/cmake/' % get_software_root('Eigen'))
+
+        # libcurl (geturl command, KIM) comes from the cURL dependency, not from the sysroot or the build host
+        for opt in det_curl_configopts(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext()):
+            self.cfg.update('configopts', opt)
 
         # LAMMPS Configuration Options
         # https://docs.lammps.org/Build_basics.html
@@ -626,6 +925,10 @@ class EB_LAMMPS(CMakeMake):
             else:
                 self.cfg['runtest'] = False
 
+        # The linker must resolve curl's versioned symbols through the selected dependency.
+        curl_libdir = det_curl_libdir(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext())
+        rpath_link_dirs = [curl_libdir] if curl_libdir else []
+
         # For crosscompiling LAMMPS with CUDA:
         # - CUDA stubs need to be explicitly added to the linker
         # - libcuda.so needs to be added to LD_PRELOAD
@@ -636,13 +939,18 @@ class EB_LAMMPS(CMakeMake):
             # so we use -rpath-link (as opposed to -rpath)
             if self.toolchain.use_rpath:
                 cuda_root = get_software_root('CUDA')
-                self.cfg.update('configopts', f'-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,{cuda_root}/lib/stubs')
+                rpath_link_dirs.append(os.path.join(cuda_root, 'lib', 'stubs'))
 
             ld_preload = get_ld_preload_value_cuda_stubs()
             env.setvar('LD_PRELOAD', ld_preload)
             msg = "Cross-compiling NVIDIA GPU build on CPU-only system, "
             msg += f"so $LD_PRELOAD updated to include CUDA stub libraries: {ld_preload}"
             self.log.info(msg)
+
+        linker_flags = det_lammps_exe_linker_flags(self.cfg['configopts'], rpath_link_dirs,
+                                                  default_flags=os.environ.get('LDFLAGS', ''))
+        if linker_flags:
+            self.cfg.update('configopts', linker_flags)
 
         return super().configure_step()
 
@@ -659,9 +967,11 @@ class EB_LAMMPS(CMakeMake):
         # Copy over the examples so we can repeat the sanity check
         # (some symlinks may be broken)
         examples_dir = os.path.join(self.start_dir, 'examples')
-        copy_dir(examples_dir, os.path.join(self.installdir, 'examples'), symlinks=True)
+        copy_lammps_examples(examples_dir, os.path.join(self.installdir, 'examples'),
+                             dirs_exist_ok=self.cfg['keeppreviousinstall'])
         potentials_dir = os.path.join(self.start_dir, 'potentials')
-        copy_dir(potentials_dir, os.path.join(self.installdir, 'potentials'))
+        copy_dir(potentials_dir, os.path.join(self.installdir, 'potentials'),
+                 dirs_exist_ok=self.cfg['keeppreviousinstall'])
 
         if LooseVersion(self.cur_version) >= LooseVersion(translate_lammps_version('2Aug2023')):
             # From ver 2Aug2023:
@@ -693,6 +1003,10 @@ class EB_LAMMPS(CMakeMake):
 
     def test_step(self):
         """Filter the ctests that should be run"""
+        # Provide a host-trusted CAfile when the caller has not chosen CURL_CA_BUNDLE,
+        # so geturl/libcurl TLS checks during tests use the public trust store.
+        ensure_lammps_curl_ca_bundle()
+
         # add flags to test_cmd to ignore some tests
         if self.cfg.get('runtest') is True and not self.cfg.get('test_cmd'):
             test_cmd = 'ctest'
@@ -715,6 +1029,12 @@ class EB_LAMMPS(CMakeMake):
                     env.setvar('OMPI_MCA_rmaps_base_oversubscribe', '1')
 
         super().test_step()
+
+    def make_module_extra(self, *args, **kwargs):
+        """Add portable CURL_CA_BUNDLE pushenv discovery to the generated module."""
+        txt = super().make_module_extra(*args, **kwargs)
+        txt += lammps_curl_ca_bundle_module_statements(self.module_generator)
+        return txt
 
     def sanity_check_step(self, *args, **kwargs):
         """Run custom sanity checks for LAMMPS files, dirs and commands."""
@@ -740,7 +1060,7 @@ class EB_LAMMPS(CMakeMake):
             # LAMMPS test - you need to call specific test file on path
             'from lammps import lammps; l=lammps(); l.file("%s")' %
             # Examples are part of the install with paths like (installdir)/examples/filename/in.filename
-            os.path.join(self.installdir, "examples", "%s" % check_file, "in.%s" % check_file)
+            lammps_example_input(self.installdir, check_file, dry_run=self.dry_run)
             # And this should be done for every file specified above
             for check_file in sanity_check_test_inputs
         ]
@@ -763,34 +1083,41 @@ class EB_LAMMPS(CMakeMake):
                     'from lammps import lammps; '
                     'l=lammps(cmdargs=["-sf", "intel"]).file("%s") '
                     'if "INTEL" in lammps().installed_packages else None' %
-                    os.path.join(self.installdir, "examples", "msst", "in.msst")
+                    lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                 )
             if self.cfg['kokkos']:  # KOKKOS package
+                kokkos_cleanup = ''
+                if LooseVersion(self.cur_version) >= LooseVersion(translate_lammps_version('22Jul2025')):
+                    # Kokkos resources must be released while the CUDA runtime is active.
+                    # The external Python interpreter owns its finalization.
+                    kokkos_cleanup = ('; l.close(); l.lib.lammps_kokkos_finalize(); '
+                                      'l.lib.lammps_mpi_finalize(); l.lib.lammps_plugin_finalize()')
                 if self.cuda:
                     if run_gpu_tests:
                         custom_commands.append(
-                            'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
-                            'l.file("%s")' % os.path.join(self.installdir, "examples", "msst", "in.msst")
+                            ('from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
+                             'l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) +
+                            kokkos_cleanup
                         )
                 else:  # CPU only
                     custom_commands.append(
-                        'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on"]); l.file("%s")' %
-                        os.path.join(self.installdir, "examples", "msst", "in.msst")
+                        ('from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on"]); l.file("%s")' %
+                         lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) + kokkos_cleanup
                     )
             elif run_gpu_tests:  # GPU package
                 custom_commands.append(
                     'from lammps import lammps; l=lammps(cmdargs=["-sf", "gpu", "-pk", "gpu", "1"]); l.file("%s")' %
-                    os.path.join(self.installdir, "examples", "msst", "in.msst")
+                    lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                 )
             if self.toolchain.options.get('openmp', None):  # OPENMP package
                 custom_commands.append(
                     'from lammps import lammps; l=lammps(cmdargs=["-sf", "omp", "-pk", "omp", "2"]); l.file("%s")' %
-                    os.path.join(self.installdir, "examples", "msst", "in.msst")
+                    lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                 )
             # OPT package
             custom_commands.append(
                 'from lammps import lammps; l=lammps(cmdargs=["-sf", "opt"]); l.file("%s")' %
-                os.path.join(self.installdir, "examples", "msst", "in.msst")
+                lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
             )
 
         # mpirun command needs an l.finalize() in the sanity check from LAMMPS 29Sep2021
