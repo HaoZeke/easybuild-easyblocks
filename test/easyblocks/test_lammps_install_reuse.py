@@ -27,6 +27,7 @@ class LammpsInstallReuse(unittest.TestCase):
         (self.source / 'potentials/pair.table').write_text('potential fixture\n')
         (self.source / 'examples/missing.link').symlink_to('missing-input')
         self.block = object.__new__(EB_LAMMPS)
+        self.block.log = mock.Mock()
         self.block.cfg = {'start_dir': str(self.source), 'keeppreviousinstall': False}
         self.block.installdir = str(self.install)
         self.block.builddir = str(self.root / 'build')
