@@ -30,6 +30,7 @@ EasyBuild support for building and installing Libint, implemented as an easybloc
 """
 
 import os.path
+import shlex
 from easybuild.tools import LooseVersion
 
 from easybuild.easyblocks.generic.configuremake import DEFAULT_CONFIGURE_CMD, ConfigureMake
@@ -37,9 +38,35 @@ from easybuild.easyblocks.generic.cmakemake import CMakeMake
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.tools.build_log import EasyBuildError, print_msg
 from easybuild.tools.filetools import change_dir, extract_file
-from easybuild.tools.modules import MODULE_LOAD_ENV_HEADERS
+from easybuild.tools.modules import MODULE_LOAD_ENV_HEADERS, get_software_root
 from easybuild.tools.run import run_shell_cmd
 from easybuild.tools.systemtools import get_shared_lib_ext
+
+
+def libint_fortran_cmake_flag(version):
+    """CMake option that turns on Libint's Fortran interface.
+
+    Libint 2.12 renamed ENABLE_FORTRAN to LIBINT2_ENABLE_FORTRAN in
+    export/cmake/CMakeLists.txt.export. The previous name is not read.
+    """
+    if LooseVersion(version) >= LooseVersion('2.12.0'):
+        return '-DLIBINT2_ENABLE_FORTRAN=ON'
+    return '-DENABLE_FORTRAN=ON'
+
+
+def libint_compiler_configure_cmd(preconfigopts, compiler_configopts, boost_root=None):
+    """Shell command for the Libint compiler's autoconf ./configure.
+
+    configopts is reserved for the generated library's CMake. Autoconf rejects
+    those -D flags, for example:
+    configure: error: unrecognized option: '-DLIBINT2_ENABLE_FORTRAN=ON'
+    """
+    options = shlex.split(compiler_configopts)
+    if boost_root and not any(opt == '--with-boost' or opt.startswith('--with-boost=') for opt in options):
+        # Autoconf must inspect the managed headers without adding host include directories.
+        compiler_configopts += ' --with-boost=%s' % shlex.quote(boost_root)
+    parts = [preconfigopts, './configure', compiler_configopts]
+    return ' '.join(part for part in parts if part)
 
 
 class EB_Libint(CMakeMake):
@@ -83,12 +110,8 @@ class EB_Libint(CMakeMake):
             # first run autogen.sh script to generate initial configure script
             run_shell_cmd("./autogen.sh")
 
-            cmd = ' '.join([
-                self.cfg['preconfigopts'],
-                './configure',
-                self.cfg['configopts'],
-                self.cfg['libint_compiler_configopts'],
-            ])
+            cmd = libint_compiler_configure_cmd(
+                self.cfg['preconfigopts'], self.cfg['libint_compiler_configopts'], get_software_root('Boost'))
             run_shell_cmd(cmd)
 
             print_msg("generating Libint library...")
@@ -134,7 +157,7 @@ class EB_Libint(CMakeMake):
 
         else:
             if self.cfg['with_fortran']:
-                self.cfg.update('configopts', '-DENABLE_FORTRAN=ON')
+                self.cfg.update('configopts', libint_fortran_cmake_flag(self.version))
 
             # also build shared libraries (not enabled by default)
             self.cfg.update('configopts', "-DLIBINT2_BUILD_SHARED_AND_STATIC_LIBS=ON")

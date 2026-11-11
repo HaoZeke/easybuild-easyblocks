@@ -45,11 +45,13 @@ import test.easyblocks.easyblock_specific as e
 import test.easyblocks.general as g
 import test.easyblocks.init_easyblocks as i
 import test.easyblocks.module as m
+import test.easyblocks.test_libint_compiler_paths as libint_compiler_paths
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
     def __init__(self, loader):
         super().__init__([x.suite(loader) for x in [g, i, m, e]])
+        self.addTests(loader.loadTestsFromModule(libint_compiler_paths))
 
     def run(self, *args, **kwargs):
         # initialize logger for all the unit tests
