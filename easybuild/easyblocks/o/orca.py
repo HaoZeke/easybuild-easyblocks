@@ -35,7 +35,7 @@ from easybuild.easyblocks.generic.makecp import MakeCp
 from easybuild.easyblocks.generic.packedbinary import PackedBinary
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.filetools import write_file
+from easybuild.tools.filetools import symlink, write_file
 from easybuild.tools.systemtools import X86_64, get_cpu_architecture
 
 
@@ -104,6 +104,12 @@ class EB_ORCA(PackedBinary, MakeCp):
             self.cfg['files_to_copy'] = files_to_copy
 
         MakeCp.install_step(self)
+
+        # Shared executables use $ORIGIN/lib for the vendor runtime libraries.
+        libdir = os.path.join(self.installdir, 'lib')
+        binlib = os.path.join(self.installdir, 'bin', 'lib')
+        if glob.glob(os.path.join(libdir, 'liborca*')) and not os.path.lexists(binlib):
+            symlink(os.path.join(os.pardir, 'lib'), binlib, use_abspath_source=False)
 
     def sanity_check_step(self):
         """Custom sanity check for ORCA"""
