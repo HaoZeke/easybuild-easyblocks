@@ -30,18 +30,19 @@ class OrcaLibraryLayout(unittest.TestCase):
         self.binary_content = b'synthetic ORCA executable fixture\n'
         self.library_content = b'synthetic ORCA shared library fixture\n'
 
-    def install_fixture(self, name='orca', libraries=('liborca_fixture.so.6',), existing_entry=None):
+    def install_fixture(self, name='orca', libraries=('liborca_fixture.so.6',), existing_entry=None,
+                        binary_subdir='bin'):
         """Materialize a synthetic vendor installation through the MakeCp boundary."""
         installdir = self.root / name
         easyblock = SimpleNamespace(
-            cfg={'files_to_copy': [(['orca'], 'bin')]},
+            cfg={'files_to_copy': [(['orca'], binary_subdir)]},
             installdir=str(installdir),
             version='6.1.1',
             log=mock.Mock(),
         )
 
         def install_vendor_files(block):
-            bindir = Path(block.installdir) / 'bin'
+            bindir = Path(block.installdir) / binary_subdir
             bindir.mkdir(parents=True)
             (bindir / 'orca').write_bytes(self.binary_content)
             for library in libraries:
@@ -65,7 +66,7 @@ class OrcaLibraryLayout(unittest.TestCase):
         with mock.patch.object(MakeCp, 'install_step', autospec=True, side_effect=install_vendor_files) as install:
             EB_ORCA.install_step(easyblock)
         install.assert_called_once_with(easyblock)
-        self.assertEqual((installdir / 'bin' / 'orca').read_bytes(), self.binary_content)
+        self.assertEqual((installdir / binary_subdir / 'orca').read_bytes(), self.binary_content)
         return installdir
 
     def test_vendor_origin_library_path_resolves_to_the_installed_library(self):
@@ -111,6 +112,13 @@ class OrcaLibraryLayout(unittest.TestCase):
                     self.assertTrue(binlib.is_symlink())
                     self.assertEqual(os.readlink(str(binlib)), '../missing-vendor-lib')
                     self.assertFalse(binlib.exists())
+
+    def test_custom_root_executable_layout_has_no_bin_library_link(self):
+        """A custom executable location retains its sibling library directory."""
+        installdir = self.install_fixture(binary_subdir='')
+        self.assertFalse((installdir / 'bin').exists())
+        self.assertEqual((installdir / 'orca').read_bytes(), self.binary_content)
+        self.assertEqual((installdir / 'lib' / 'liborca_fixture.so.6').read_bytes(), self.library_content)
 
     def test_static_layout_without_orca_libraries_has_no_bin_library_link(self):
         """A static executable requires no compatibility link or invented library directory."""
