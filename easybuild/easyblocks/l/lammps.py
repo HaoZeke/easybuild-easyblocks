@@ -33,6 +33,7 @@
 import glob
 import os
 import re
+import shlex
 import tempfile
 import copy
 from easybuild.tools import LooseVersion
@@ -301,6 +302,64 @@ def det_curl_configopts(curl_root, configopts, shlib_ext):
     return opts
 
 
+def _cmake_definitions(configopts):
+    """Read effective -D definitions without changing caller-supplied CMake options."""
+    definitions = {}
+    tokens = iter(shlex.split(configopts))
+    for token in tokens:
+        if token == '-D':
+            definition = next(tokens, '')
+        elif token.startswith('-D'):
+            definition = token[2:]
+        else:
+            continue
+        name, separator, value = definition.partition('=')
+        if separator:
+            definitions[name.split(':', 1)[0]] = value
+    return definitions
+
+
+def det_curl_libdir(curl_root, configopts, shlib_ext):
+    """Locate the selected shared curl library without overriding an explicit package lookup."""
+    definitions = _cmake_definitions(configopts)
+    if 'CURL_ROOT' in definitions or 'CURL_DIR' in definitions:
+        return None
+    library = definitions.get('CURL_LIBRARY')
+    if library is None:
+        configurations = ['RELEASE', 'DEBUG']
+        if definitions.get('CMAKE_BUILD_TYPE', '').lower() == 'debug':
+            configurations.reverse()
+        for configuration in configurations:
+            key = 'CURL_LIBRARY_' + configuration
+            if key in definitions:
+                library = definitions[key]
+                break
+    if library is None and curl_root:
+        candidates = [os.path.join(curl_root, subdir, 'libcurl.' + shlib_ext) for subdir in ('lib', 'lib64')]
+        library = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+    if (library and os.path.isabs(library) and os.path.isfile(library)
+            and re.search(r'\.%s(?:\.[0-9]+)*$' % re.escape(shlib_ext), library)):
+        return os.path.dirname(library)
+    return None
+
+
+def det_lammps_exe_linker_flags(configopts, rpath_link_dirs, default_flags=''):
+    """Merge runtime dependency lookup paths with the effective executable linker flags."""
+    flags = _cmake_definitions(configopts).get('CMAKE_EXE_LINKER_FLAGS', default_flags)
+    existing = shlex.split(flags)
+    additions = []
+    for directory in rpath_link_dirs:
+        flag = '-Wl,-rpath-link,' + directory
+        if flag not in existing and flag not in additions:
+            additions.append(flag)
+    if not additions:
+        return None
+    combined = ' '.join(shlex.quote(flag) for flag in additions)
+    if flags:
+        combined += ' ' + flags
+    return '-DCMAKE_EXE_LINKER_FLAGS:STRING=' + shlex.quote(combined)
+
+
 def lammps_example_input(installdir, check_file, dry_run=False):
     """Locate installed examples, or report their conventional paths in a dry run."""
     name = os.path.basename(check_file)
@@ -471,9 +530,35 @@ class EB_LAMMPS(CMakeMake):
         })
         return extra_vars
 
+    def _prepare_curl_rpath(self, *args, **kwargs):
+        """Create RPATH wrappers with the selected curl after dependency modules are loaded."""
+        options = self.toolchain.options
+        use_rpath = build_option('rpath') and options.get('rpath', True)
+        if use_rpath:
+            has_rpath_option = 'rpath' in options
+            original_rpath = options.get('rpath')
+            options['rpath'] = False
+            try:
+                super().prepare_step(*args, **kwargs)
+            finally:
+                if has_rpath_option:
+                    options['rpath'] = original_rpath
+                else:
+                    del options['rpath']
+            curl_libdir = det_curl_libdir(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext())
+            if curl_libdir and curl_libdir not in self.rpath_include_dirs:
+                self.rpath_include_dirs.append(curl_libdir)
+            self.toolchain.prepare_rpath_wrappers(rpath_filter_dirs=self.rpath_filter_dirs,
+                                                  rpath_include_dirs=self.rpath_include_dirs,
+                                                  rpath_wrappers_dir=self.rpath_wrappers_dir)
+            self.toolchain.use_rpath = True
+            self.cached_build_env = env.copy_current_env()
+        else:
+            super().prepare_step(*args, **kwargs)
+
     def prepare_step(self, *args, **kwargs):
         """Custom prepare step for LAMMPS."""
-        super().prepare_step(*args, **kwargs)
+        self._prepare_curl_rpath(*args, **kwargs)
 
         # version 1.3.2 is used in the test suite to check easyblock can be initialised
         if self.version != '1.3.2':
@@ -808,6 +893,10 @@ class EB_LAMMPS(CMakeMake):
             else:
                 self.cfg['runtest'] = False
 
+        # The linker must resolve curl's versioned symbols through the selected dependency.
+        curl_libdir = det_curl_libdir(get_software_root('cURL'), self.cfg['configopts'], get_shared_lib_ext())
+        rpath_link_dirs = [curl_libdir] if curl_libdir else []
+
         # For crosscompiling LAMMPS with CUDA:
         # - CUDA stubs need to be explicitly added to the linker
         # - libcuda.so needs to be added to LD_PRELOAD
@@ -818,13 +907,18 @@ class EB_LAMMPS(CMakeMake):
             # so we use -rpath-link (as opposed to -rpath)
             if self.toolchain.use_rpath:
                 cuda_root = get_software_root('CUDA')
-                self.cfg.update('configopts', f'-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,{cuda_root}/lib/stubs')
+                rpath_link_dirs.append(os.path.join(cuda_root, 'lib', 'stubs'))
 
             ld_preload = get_ld_preload_value_cuda_stubs()
             env.setvar('LD_PRELOAD', ld_preload)
             msg = "Cross-compiling NVIDIA GPU build on CPU-only system, "
             msg += f"so $LD_PRELOAD updated to include CUDA stub libraries: {ld_preload}"
             self.log.info(msg)
+
+        linker_flags = det_lammps_exe_linker_flags(self.cfg['configopts'], rpath_link_dirs,
+                                                  default_flags=os.environ.get('LDFLAGS', ''))
+        if linker_flags:
+            self.cfg.update('configopts', linker_flags)
 
         return super().configure_step()
 
