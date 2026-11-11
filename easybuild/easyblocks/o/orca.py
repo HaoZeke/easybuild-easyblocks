@@ -29,14 +29,69 @@ EasyBuild support for ORCA, implemented as an easyblock
 """
 import glob
 import os
+import re
+import shlex
+import struct
+import tempfile
 
 from easybuild.tools import LooseVersion
 from easybuild.easyblocks.generic.makecp import MakeCp
 from easybuild.easyblocks.generic.packedbinary import PackedBinary
 from easybuild.framework.easyconfig import CUSTOM
 from easybuild.tools.build_log import EasyBuildError
-from easybuild.tools.filetools import symlink, write_file
+from easybuild.tools.config import build_option
+from easybuild.tools.filetools import symlink, which, write_file
+from easybuild.tools.run import run_shell_cmd
 from easybuild.tools.systemtools import X86_64, get_cpu_architecture
+
+
+ORCA_PT_LOAD = 1
+ORCA_ET_EXEC = 2
+ORCA_MIN_LOAD_VADDR = 0x10000
+ORCA_MAX_LOAD_ALIGNMENT = 0x200000
+
+
+def orca_elf_load_info(path):
+    """Return the ELF type and (offset, virtual address, alignment) of its load segments."""
+    try:
+        with open(path, 'rb') as stream:
+            ident = stream.read(16)
+            if (len(ident) != 16 or ident[:4] != b'\x7fELF' or ident[4] not in (1, 2)
+                    or ident[5] not in (1, 2)):
+                raise EasyBuildError("Unsupported ELF header in %s", path)
+            endian = '<' if ident[5] == 1 else '>'
+            if ident[4] == 2:
+                ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIQQQIHHH', endian + 'IIQQQQQQ', 2, 3
+            else:
+                ehdr, phdr, offset_idx, vaddr_idx = endian + 'HHIIIIIHHH', endian + 'IIIIIIII', 1, 2
+            header = struct.unpack(ehdr, stream.read(struct.calcsize(ehdr)))
+            phoff, phentsize, phnum = header[4], header[8], header[9]
+            if phentsize < struct.calcsize(phdr):
+                raise EasyBuildError("Unsupported ELF program header size in %s", path)
+            segments = []
+            for index in range(phnum):
+                stream.seek(phoff + index * phentsize)
+                entry = struct.unpack(phdr, stream.read(struct.calcsize(phdr)))
+                if entry[0] == ORCA_PT_LOAD:
+                    segments.append((entry[offset_idx], entry[vaddr_idx], entry[7]))
+            return header[0], segments
+    except (OSError, struct.error) as err:
+        raise EasyBuildError("Failed to read ELF load segments in %s: %s", path, err)
+
+
+def orca_permanent_rpaths(rpath, excluded_roots):
+    """Keep unique absolute toolchain paths outside the build and temporary directories."""
+    roots = [os.path.realpath(root) for root in excluded_roots if root]
+    entries = []
+    for entry in rpath.split(':'):
+        if not os.path.isabs(entry):
+            continue
+        resolved = os.path.realpath(entry)
+        if any(os.path.commonpath([resolved, root]) == root for root in roots):
+            continue
+        if entry not in entries:
+            entries.append(entry)
+    return entries
 
 
 class EB_ORCA(PackedBinary, MakeCp):
@@ -111,6 +166,101 @@ class EB_ORCA(PackedBinary, MakeCp):
         if (os.path.isdir(os.path.dirname(binlib)) and glob.glob(os.path.join(libdir, 'liborca*'))
                 and not os.path.lexists(binlib)):
             symlink(os.path.join(os.pardir, 'lib'), binlib, use_abspath_source=False)
+
+    def _mpi_consumers(self):
+        """Find installed ELF files with a direct dependency on an MPI runtime library."""
+        files = set()
+        for directory, subdirs, filenames in os.walk(self.installdir, followlinks=False):
+            if directory == self.installdir:
+                subdirs[:] = [name for name in subdirs if name in ('bin', 'lib', 'lib64')]
+            for filename in filenames:
+                path = os.path.join(directory, filename)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                with open(path, 'rb') as stream:
+                    if stream.read(4) != b'\x7fELF':
+                        continue
+                dynamic = run_shell_cmd("readelf -d %s" % shlex.quote(path), hidden=True).output
+                if re.search(r'\(NEEDED\).*\[libmpi[^]]*\]', dynamic):
+                    files.add(path)
+        return sorted(files)
+
+    def _toolchain_mpi_rpath(self):
+        """Link an MPI probe with the active wrappers without executing it."""
+        compiler = os.environ.get('MPICC')
+        if not compiler:
+            raise EasyBuildError("MPICC is required to determine the active MPI runtime RPATH")
+        source = os.path.join(self.builddir, 'eb_orca_mpi_rpath.c')
+        executable = os.path.join(self.builddir, 'eb_orca_mpi_rpath')
+        write_file(source, '#include <mpi.h>\n'
+                   'int main(int argc, char **argv) {\n'
+                   '    MPI_Init(&argc, &argv);\n'
+                   '    return MPI_Finalize();\n'
+                   '}\n')
+        command = ' '.join([compiler, os.environ.get('CPPFLAGS', ''), os.environ.get('CFLAGS', ''),
+                            shlex.quote(source), '-o', shlex.quote(executable), os.environ.get('LDFLAGS', '')])
+        run_shell_cmd(command, work_dir=self.builddir, hidden=True)
+        rpath = run_shell_cmd("patchelf --print-rpath %s" % shlex.quote(executable), hidden=True).output.strip()
+        excluded = [self.builddir, self.cfg.get('start_dir'), os.environ.get('TMPDIR'),
+                    tempfile.gettempdir(), '/tmp', '/var/tmp']
+        entries = orca_permanent_rpaths(rpath, excluded)
+        if not entries:
+            raise EasyBuildError("The active MPI compiler did not provide permanent RPATH entries")
+        return entries
+
+    def _append_mpi_rpath(self, path, additions):
+        """Preserve vendor search paths and ELF load safety while adding the selected MPI paths."""
+        quoted_path = shlex.quote(path)
+        current = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+        original = [entry for entry in current.split(':') if entry]
+        entries = list(original)
+        for addition in additions:
+            if addition not in entries:
+                entries.append(addition)
+        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+        if entries == original and '(RPATH)' in dynamic:
+            return
+
+        elf_type, segments = orca_elf_load_info(path)
+        alignments = [align for _, _, align in segments]
+        if not alignments or any(align > ORCA_MAX_LOAD_ALIGNMENT or align & (align - 1) for align in alignments):
+            raise EasyBuildError("Unsupported PT_LOAD alignment in %s: %s", path, alignments)
+        alignment = max(alignments + [1])
+        fixed_address = elf_type == ORCA_ET_EXEC
+        # A large page size can place a fixed-address image's grown string table on page zero.
+        page_size = '--page-size %d ' % alignment if alignment > 0x1000 and not fixed_address else ''
+        run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s" %
+                      (page_size, shlex.quote(':'.join(entries)), quoted_path), hidden=True)
+        recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+        if recorded.split(':') != entries:
+            raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
+        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+        if '(RPATH)' not in dynamic:
+            raise EasyBuildError("DT_RPATH was not recorded for %s", path)
+        patched_type, patched_segments = orca_elf_load_info(path)
+        if patched_type != elf_type or not patched_segments:
+            raise EasyBuildError("ELF load structure was not preserved in %s", path)
+        for offset, vaddr, align in patched_segments:
+            if align > 1 and (vaddr - offset) % align:
+                raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
+            if fixed_address and vaddr < ORCA_MIN_LOAD_VADDR:
+                raise EasyBuildError("RPATH rewrite placed a load segment below %#x in %s", ORCA_MIN_LOAD_VADDR, path)
+            if not fixed_address and align < min(alignments):
+                raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
+
+    def post_processing_step(self):
+        """Give precompiled MPI consumers the permanent RPATH of the selected toolchain."""
+        super().post_processing_step()
+        if not build_option('rpath') and 'LD_LIBRARY_PATH' not in (build_option('filter_env_vars') or []):
+            return
+        consumers = self._mpi_consumers()
+        if not consumers:
+            return
+        if which('patchelf') is None:
+            raise EasyBuildError("patchelf is required to record the active ORCA MPI runtime paths")
+        additions = self._toolchain_mpi_rpath()
+        for path in consumers:
+            self._append_mpi_rpath(path, additions)
 
     def sanity_check_step(self):
         """Custom sanity check for ORCA"""
