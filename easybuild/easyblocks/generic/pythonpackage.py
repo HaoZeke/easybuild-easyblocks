@@ -176,7 +176,8 @@ def det_python_version(python_cmd):
     """Determine version of specified 'python' command."""
     pycode = 'import sys; print("%s.%s.%s" % sys.version_info[:3])'
     res = run_shell_cmd("%s -c '%s'" % (python_cmd, pycode), hidden=True)
-    return res.output.strip()
+    # Interpreter launchers can print diagnostics before the version.
+    return res.output.strip().split('\n')[-1]
 
 
 def pick_python_cmd(req_maj_ver=None, req_min_ver=None, max_py_majver=None, max_py_minver=None):
