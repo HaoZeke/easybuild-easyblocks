@@ -65,7 +65,11 @@ class LammpsKokkosCleanup(unittest.TestCase):
         class Instance:
             def __init__(self, cmdargs=None):
                 events.append(('open', cmdargs))
-                self.lib = SimpleNamespace(lammps_kokkos_finalize=lambda: events.append(('kokkos_finalize',)))
+                self.lib = SimpleNamespace(
+                    lammps_kokkos_finalize=lambda: events.append(('kokkos_finalize',)),
+                    lammps_mpi_finalize=lambda: events.append(('mpi_finalize',)),
+                    lammps_plugin_finalize=lambda: events.append(('plugin_finalize',)),
+                )
 
             def file(self, path):
                 events.append(('file', path))
@@ -87,7 +91,7 @@ class LammpsKokkosCleanup(unittest.TestCase):
         self.assertEqual(self.execute(code), [
             ('open', ['-sf', 'kk', '-k', 'on', 'g', '1']),
             ('file', str(self.root / 'examples' / 'msst' / 'in.msst')),
-            ('close',), ('kokkos_finalize',),
+            ('close',), ('kokkos_finalize',), ('mpi_finalize',), ('plugin_finalize',),
         ])
 
     def test_modern_cpu_kokkos_uses_the_same_resource_order(self):
@@ -95,12 +99,14 @@ class LammpsKokkosCleanup(unittest.TestCase):
         self.assertEqual(self.execute(code), [
             ('open', ['-sf', 'kk', '-k', 'on']),
             ('file', str(self.root / 'examples' / 'msst' / 'in.msst')),
-            ('close',), ('kokkos_finalize',),
+            ('close',), ('kokkos_finalize',), ('mpi_finalize',), ('plugin_finalize',),
         ])
 
-    def test_first_modern_release_finalizes_only_kokkos(self):
+    def test_first_modern_release_preserves_external_python_lifetime(self):
         code = self.kokkos_code(version='22Jul2025')
-        self.assertEqual(self.execute(code)[2:], [('close',), ('kokkos_finalize',)])
+        self.assertEqual(self.execute(code)[2:], [
+            ('close',), ('kokkos_finalize',), ('mpi_finalize',), ('plugin_finalize',),
+        ])
 
     def test_legacy_release_retains_full_finalize(self):
         code = self.kokkos_code(version='29Aug2024')

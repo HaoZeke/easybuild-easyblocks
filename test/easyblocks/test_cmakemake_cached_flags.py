@@ -38,7 +38,7 @@ class CmakeCachedFlags(unittest.TestCase):
         self.block.cfg.toolchain = SimpleNamespace(options={})
         self.block.installdir = '/selected/install'
         self.block.log = mock.Mock()
-        self.block._cmake_version = LooseVersion('4.2.1')
+        self.block._cmake_version = '4.2.1'
         self.block.check_python_paths = mock.Mock()
         self.flags = {
             'CFLAGS': '-O2 -ftree-vectorize -fopenmp -fno-math-errno',
@@ -98,7 +98,7 @@ class CmakeCachedFlags(unittest.TestCase):
             self.assertNotIn(definition, definitions)
 
     def test_legacy_cmake_flag_definitions_use_the_same_argument_contract(self):
-        self.block._cmake_version = LooseVersion('2.6.4')
+        self.block._cmake_version = '2.6.4'
         _, definitions = self.configure(cache=False)
         self.assert_flag_definitions(definitions, self.flags)
 
