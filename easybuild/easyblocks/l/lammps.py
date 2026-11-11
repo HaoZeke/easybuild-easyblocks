@@ -1060,8 +1060,8 @@ class EB_LAMMPS(CMakeMake):
                 if self.cuda:
                     if run_gpu_tests:
                         custom_commands.append(
-                            'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
-                            ('l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) +
+                            ('from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
+                             'l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) +
                             kokkos_cleanup
                         )
                 else:  # CPU only
