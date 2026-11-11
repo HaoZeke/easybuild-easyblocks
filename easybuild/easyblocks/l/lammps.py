@@ -1052,16 +1052,22 @@ class EB_LAMMPS(CMakeMake):
                     lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
                 )
             if self.cfg['kokkos']:  # KOKKOS package
+                kokkos_cleanup = ''
+                if LooseVersion(self.cur_version) >= LooseVersion(translate_lammps_version('22Jul2025')):
+                    # Kokkos resources must be released while the CUDA runtime is active.
+                    # The external Python interpreter and mpi4py own their finalization.
+                    kokkos_cleanup = '; l.close(); l.lib.lammps_kokkos_finalize()'
                 if self.cuda:
                     if run_gpu_tests:
                         custom_commands.append(
                             'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on", "g", "1"]); '
-                            'l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
+                            ('l.file("%s")' % lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) +
+                            kokkos_cleanup
                         )
                 else:  # CPU only
                     custom_commands.append(
-                        'from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on"]); l.file("%s")' %
-                        lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)
+                        ('from lammps import lammps; l=lammps(cmdargs=["-sf", "kk", "-k", "on"]); l.file("%s")' %
+                         lammps_example_input(self.installdir, 'msst', dry_run=self.dry_run)) + kokkos_cleanup
                     )
             elif run_gpu_tests:  # GPU package
                 custom_commands.append(

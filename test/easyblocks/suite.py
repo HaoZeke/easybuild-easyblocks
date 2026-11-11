@@ -50,6 +50,7 @@ import test.easyblocks.test_lammps_curl_configopts as lammps_curl
 import test.easyblocks.test_lammps_curl_linking as lammps_linking
 import test.easyblocks.test_lammps_example_dry_run as lammps_dry_run
 import test.easyblocks.test_lammps_example_paths as lammps_paths
+import test.easyblocks.test_lammps_kokkos_cleanup as lammps_cleanup
 import test.easyblocks.test_orca_library_layout as orca_layout
 import test.easyblocks.test_orca_mpi_rpath as orca_mpi
 
@@ -59,6 +60,7 @@ class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
         super().__init__([x.suite(loader) for x in [g, i, m, e, lammps_curl, lammps_dry_run, lammps_ca]])
         self.addTests(loader.loadTestsFromModule(lammps_paths))
         self.addTests(lammps_linking.suite(loader))
+        self.addTests(lammps_cleanup.suite(loader))
         self.addTests(orca_layout.suite(loader))
         self.addTests(orca_mpi.suite(loader))
 
