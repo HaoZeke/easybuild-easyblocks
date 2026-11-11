@@ -1,18 +1,17 @@
 """Replacement RPATH uses the ORCA load-layout and interpreter safeguards."""
 import shlex
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from easybuild.easyblocks.o.orca import orca_elf_replace_rpath
 from easybuild.tools.build_log import EasyBuildError
-from test.easyblocks.test_orca_mpi_interpreter import OrcaMpiInterpreter
-from test.easyblocks.test_orca_mpi_rpath import OrcaMpiRpath
+from test.easyblocks import test_orca_mpi_interpreter as interpreter_fixture
+from test.easyblocks import test_orca_mpi_rpath as rpath_fixture
 
 
 class OrcaElfReplaceRpath(unittest.TestCase):
     def setUp(self):
-        self.fixture = OrcaMpiRpath('test_elf_load_information_reads_the_real_program_headers')
+        self.fixture = rpath_fixture.OrcaMpiRpath('test_elf_load_information_reads_the_real_program_headers')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 
@@ -67,7 +66,7 @@ class OrcaElfReplaceRpath(unittest.TestCase):
                         orca_elf_replace_rpath(str(path), ['/logical/mpi/lib'])
 
     def test_replacement_keeps_the_selected_interpreter(self):
-        fixture = OrcaMpiInterpreter('test_program_headers_distinguish_an_executable_from_a_shared_library')
+        fixture = interpreter_fixture.OrcaMpiInterpreter('test_program_headers_distinguish_an_executable_from_a_shared_library')
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         path = fixture.elf(fixture.root / 'orca_mpi', fixture.loader)
