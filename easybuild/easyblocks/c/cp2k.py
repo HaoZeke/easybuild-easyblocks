@@ -42,32 +42,150 @@ import glob
 import re
 import os
 import sys
+from shlex import quote
 from easybuild.tools import LooseVersion
 
 import easybuild.tools.toolchain as toolchain
-from easybuild.framework.easyblock import EasyBlock
+from easybuild.easyblocks.generic.cmakemake import CMakeMake
 from easybuild.framework.easyconfig import CUSTOM
-from easybuild.tools.build_log import EasyBuildError
+from easybuild.tools.build_log import EasyBuildError, print_warning
 from easybuild.tools.environment import setvar
 from easybuild.tools.filetools import change_dir, copy_dir, copy_file, mkdir, write_file
 from easybuild.tools.config import build_option
 from easybuild.tools.modules import get_software_root, get_software_version
 from easybuild.tools.run import run_shell_cmd
-from easybuild.tools.systemtools import get_avail_core_count
+from easybuild.tools.systemtools import get_avail_core_count, get_shared_lib_ext
+
+# CP2K 2026.1 removed the Makefile-based build (https://github.com/cp2k/cp2k/releases/tag/v2026.1)
+CMAKE_ONLY_VERSION = '2026.1'
+
+# maxtasks easyconfig default for the Makefile build before it became None.
+# CP2K < 2026.1 keeps running this many instances (the previous parameter default).
+MAKEFILE_REGTEST_MAXTASKS = 4
+
+# CMake option enabled for each dependency, and the cp2kflags that 'cp2k --version' reports for it
+# (compile definitions in src/CMakeLists.txt, flags in src/cp2k_info.F)
+CMAKE_DEP_OPTIONS = {
+    'ELPA': ('CP2K_USE_ELPA', ['elpa']),
+    'Libint': ('CP2K_USE_LIBINT2', ['libint']),
+    'libvori': ('CP2K_USE_VORI', ['libvori', 'libbqb']),
+    'libxc': ('CP2K_USE_LIBXC', ['libxc']),
+    'PLUMED': ('CP2K_USE_PLUMED', ['plumed2']),
+    'spglib': ('CP2K_USE_SPGLIB', ['spglib']),
+    # CP2K_USE_TBLITE defines __DFTD4; tests/TEST_DIRS selects dispersion cases using these flags.
+    'tblite': ('CP2K_USE_TBLITE', ['libdftd4', 'mctc-lib', 'tblite']),
+}
+# CP2K 2026.2 and later define __S_DFTD3 with CP2K_USE_TBLITE for the s_dftd3 test directories.
+TBLITE_S_DFTD3_VERSION = '2026.2'
+# options of dependencies that CP2K only honours together with CP2K_USE_MPI (cmake_dependent_option in CMakeLists.txt)
+CMAKE_MPI_ONLY_OPTIONS = ['CP2K_USE_ELPA', 'CP2K_USE_PLUMED']
+
+# per-input results in the summary printed by tests/do_regtest.py
+REGTEST_SUMMARY_PATTERNS = {
+    'failed': r'^Number of FAILED\s+tests\s+(\d+)\s*$',
+    'wrong': r'^Number of WRONG\s+tests\s+(\d+)\s*$',
+    'correct': r'^Number of CORRECT\s+tests\s+(\d+)\s*$',
+    'total': r'^Total number of\s+tests\s+(\d+)\s*$',
+}
 
 
-class EB_CP2K(EasyBlock):
+def get_cmake_option(configopts, name):
+    """Return the value given to CMake option 'name' by the last -D[ ]<name>[:<type>]=<value> in configopts, or None"""
+    regex = re.compile(r"(?:^|\s)-D\s*%s(?::\w+)?=(\"[^\"]*\"|'[^']*'|\S*)" % re.escape(name))
+    values = regex.findall(configopts)
+    if values:
+        return values[-1].strip('"\'')
+    return None
+
+
+def is_cmake_true(value):
+    """
+    Interpret the value of a CMake option as if(<variable>) does: true unless it is a false constant
+    (0, OFF, NO, FALSE, N, IGNORE, NOTFOUND, empty or ending in -NOTFOUND, in any case),
+    see https://cmake.org/cmake/help/latest/command/if.html
+    """
+    value = value.upper()
+    return not (value in ('', '0', 'OFF', 'NO', 'FALSE', 'N', 'IGNORE', 'NOTFOUND') or value.endswith('-NOTFOUND'))
+
+
+def parse_regtest_summary(output):
+    """
+    Parse the summary that CP2K's tests/do_regtest.py prints at the end of a run
+
+    :return: dict with the number of failed, wrong, correct and total tests, the number of tests without a
+             result ('na', for which the comparison with the reference failed), and the 'status' ('OK' or 'FAILED'),
+             or None if the output has no (complete) summary
+    """
+    summary = {}
+    for key, pattern in REGTEST_SUMMARY_PATTERNS.items():
+        counts = re.findall(pattern, output, re.M)
+        if not counts:
+            return None
+        summary[key] = int(counts[-1])
+    summary['na'] = summary['total'] - summary['correct'] - summary['wrong'] - summary['failed']
+
+    status = re.findall(r'^Status:\s+(\S+)\s*$', output, re.M)
+    if not status:
+        return None
+    summary['status'] = status[-1]
+
+    return summary
+
+
+def get_regtest_errors(output):
+    """Return the 'Errors' section of the output of CP2K's tests/do_regtest.py"""
+    res = re.search(r'^-+ Errors -+$\n(.*?)^-+ Timings -+$', output, re.M | re.S)
+    return res.group(1).strip() if res else ''
+
+
+def do_regtest_py_cmd(script, arguments, python_cmd=None, env_prefix=''):
+    """Assemble the shell command that runs CP2K's tests/do_regtest.py.
+
+    The Makefile path (py_regtest_cmd, CP2K < 2026.1) and the CMake path
+    (regtest_cmd, CP2K >= 2026.1) both call this. arguments are shell tokens
+    placed after the script. python_cmd defaults to this interpreter; the
+    CMake path passes 'python3 -B' so a copied tests/ tree gains no __pycache__.
+    """
+    if python_cmd is None:
+        python_cmd = sys.executable
+    return env_prefix + ' '.join([python_cmd, script] + list(arguments))
+
+
+def makefile_hdf5_sirius_options(options, hdf5_root, sirius_root):
+    """Add HDF5 and SIRIUS support to the options of the Makefile build (CP2K < 2026.1).
+
+    CP2K's INSTALL.md: -D__HDF5 enables HDF5, a hard dependency of SIRIUS; -D__SIRIUS enables SIRIUS.
+    SIRIUS installs its Fortran module in include/sirius and links its own dependencies into libsirius.
+    """
+    if sirius_root and not hdf5_root:
+        raise EasyBuildError("SIRIUS support in CP2K requires HDF5, but HDF5 is not a dependency")
+    if hdf5_root:
+        options['DFLAGS'] += ' -D__HDF5'
+        options['FCFLAGSOPT'] += ' -I%s ' % os.path.join(hdf5_root, 'include')
+        options['LIBS'] += ' -lhdf5_fortran -lhdf5'
+    if sirius_root:
+        options['DFLAGS'] += ' -D__SIRIUS'
+        options['FCFLAGSOPT'] += ' -I%s ' % os.path.join(sirius_root, 'include', 'sirius')
+        options['LIBS'] += ' -lsirius'
+    return options
+
+
+class EB_CP2K(CMakeMake):
     """
     Support for building CP2K
-    - prepare module include files if required
-    - generate custom config file in 'arch' directory
-    - build CP2K
+    - CP2K 2026.1 and newer: configure with CMake, building the CP2K_USE_* features that match the dependencies
+    - older versions:
+      - prepare module include files if required
+      - generate custom config file in 'arch' directory
+      - build CP2K
     - run regression test if desired
     - install by copying binary executables
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.cmake_build = LooseVersion(self.version) >= LooseVersion(CMAKE_ONLY_VERSION)
 
         self.typearch = None
 
@@ -87,24 +205,42 @@ class EB_CP2K(EasyBlock):
 
     @staticmethod
     def extra_options():
-        extra_vars = {
-            'extracflags': ['', "Extra CFLAGS to be added", CUSTOM],
-            'extradflags': ['', "Extra DFLAGS to be added", CUSTOM],
+        # update after CMakeMake, since it defines 'runtest' with another meaning and default
+        extra_vars = CMakeMake.extra_options()
+        extra_vars.update({
+            'extracflags': ['', "Extra CFLAGS to be added (CP2K < %s)" % CMAKE_ONLY_VERSION, CUSTOM],
+            'extradflags': ['', "Extra DFLAGS to be added (CP2K < %s)" % CMAKE_ONLY_VERSION, CUSTOM],
             'ignore_regtest_fails': [False, ("Ignore failures in regression test "
                                              "(should be used with care)"), CUSTOM],
-            'library': [False, "Also build CP2K as a library", CUSTOM],
-            'maxtasks': [4, ("Maximum number of CP2K instances run at "
-                             "the same time during testing"), CUSTOM],
+            'library': [False, "Also build CP2K as a library (CP2K < %s, which always builds it)" % CMAKE_ONLY_VERSION,
+                        CUSTOM],
+            'maxtasks': [None, ("Maximum number of CP2K instances run at the same time during testing; "
+                                "for CP2K >= %s the number of MPI ranks times OpenMP threads, "
+                                "default: 4 for older versions, else the number of cores EasyBuild uses "
+                                "(parallel)" % CMAKE_ONLY_VERSION), CUSTOM],
             'modinc': [[], ("List of modinc's to use (*.f90], or 'True' to use "
                             "all found at given prefix"), CUSTOM],
             'modincprefix': ['', "Intel MKL prefix for modinc include dir", CUSTOM],
             'runtest': [True, "Build and run CP2K tests", CUSTOM],
             'omp_num_threads': [None, "Value to set $OMP_NUM_THREADS to during testing", CUSTOM],
             'plumed': [None, "Enable PLUMED support", CUSTOM],
-            'type': ['popt', "Type of build ('popt' or 'psmp')", CUSTOM],
-            'typeopt': [True, "Enable optimization", CUSTOM],
-        }
-        return EasyBlock.extra_options(extra_vars)
+            'sanity_regtest': [True, ("Run the first input of each regression test directory with the installed "
+                                      "binaries in the sanity check (CP2K >= %s)" % CMAKE_ONLY_VERSION), CUSTOM],
+            'type': ['popt', "Type of build ('popt' or 'psmp'; CP2K < %s)" % CMAKE_ONLY_VERSION, CUSTOM],
+            'typeopt': [True, "Enable optimization (CP2K < %s)" % CMAKE_ONLY_VERSION, CUSTOM],
+        })
+        return extra_vars
+
+    @property
+    def build_type(self):
+        """
+        CMake build type: CP2K's 'Release' adds -march=native (GNU) or -xHOST (Intel) after the compiler flags
+        of EasyBuild, so use 'Generic' (as CP2K's generic toolchain build does), which keeps --optarch in effect
+        """
+        build_type = super().build_type
+        if self.cfg.get('build_type') is None and build_type == 'Release':
+            build_type = 'Generic'
+        return build_type
 
     def _generate_makefile(self, options):
         """Generate Makefile based on options dictionary and optional make instructions"""
@@ -114,11 +250,94 @@ class EB_CP2K(EasyBlock):
             text += "%s = %s\n" % (key, value)
         return text + self.make_instructions
 
+    def cmake_features(self):
+        """
+        Determine the CP2K features of a CMake build from the toolchain, the dependencies and configopts
+
+        :return: dict with the CMake options to pass by default ('options'), the effective state of each
+                 CP2K_USE_* option that the easyblock knows about ('enabled'), the cp2kflags reported by
+                 'cp2k --version' for the enabled ones ('flags'), and the suffix of the binaries ('ext')
+        """
+        configopts = self.cfg['configopts']
+        dep_names = [dep['name'] for dep in self.cfg.dependencies()]
+
+        if 'CUDA' in dep_names and get_cmake_option(configopts, 'CP2K_USE_ACCEL') is None:
+            raise EasyBuildError("CUDA is a dependency, but GPU support is not enabled: "
+                                 "set -DCP2K_USE_ACCEL and -DCP2K_WITH_GPU in configopts")
+
+        if self.cfg['plumed'] and 'PLUMED' not in dep_names:
+            raise EasyBuildError("PLUMED support is enabled (plumed = True), but PLUMED is not a dependency")
+
+        options = {}
+        if self.toolchain.mpi_family():
+            options['CP2K_USE_MPI'] = 'ON'
+            options['CP2K_USE_MPI_F08'] = 'ON'
+        if getattr(self.toolchain, 'FFT_MODULE_NAME', None) or 'FFTW' in dep_names:
+            options['CP2K_USE_FFTW3'] = 'ON'
+        for dep_name, (option, _) in sorted(CMAKE_DEP_OPTIONS.items()):
+            if dep_name in dep_names and not (dep_name == 'PLUMED' and self.cfg['plumed'] is False):
+                options[option] = 'ON'
+
+        known_options = ['CP2K_USE_MPI', 'CP2K_USE_MPI_F08', 'CP2K_USE_FFTW3']
+        known_options += [option for option, _ in CMAKE_DEP_OPTIONS.values()]
+        enabled = {}
+        for option in known_options:
+            value = get_cmake_option(configopts, option)
+            if value is None:
+                value = options.get(option, 'OFF')
+            enabled[option] = is_cmake_true(value)
+
+        if not enabled['CP2K_USE_MPI']:
+            mpi_only = [opt for opt in CMAKE_MPI_ONLY_OPTIONS if enabled[opt]]
+            if mpi_only:
+                raise EasyBuildError("CP2K only supports %s with MPI (CP2K_USE_MPI)", ', '.join(mpi_only))
+            # CMakeLists.txt also turns CP2K_USE_MPI_F08 off without MPI
+            enabled['CP2K_USE_MPI_F08'] = False
+
+        # CP2K always requires OpenMP (find_package(OpenMP REQUIRED ...) in CMakeLists.txt)
+        flags = ['omp']
+        if enabled['CP2K_USE_MPI']:
+            flags.extend(['parallel', 'scalapack'])
+        if enabled['CP2K_USE_MPI_F08']:
+            flags.append('mpi_f08')
+        if enabled['CP2K_USE_FFTW3']:
+            flags.append('fftw3')
+        for option, option_flags in sorted(CMAKE_DEP_OPTIONS.values()):
+            if enabled[option]:
+                flags.extend(option_flags)
+
+        # suffix of the binaries, see __cp2k_ext in CMakeLists.txt
+        build_type = get_cmake_option(configopts, 'CMAKE_BUILD_TYPE') or self.build_type
+        ext = ('p' if enabled['CP2K_USE_MPI'] else 's') + ('dbg' if build_type == 'Debug' else 'smp')
+
+        return {'options': options, 'enabled': enabled, 'flags': flags, 'ext': ext}
+
+    def configure_step_cmake(self):
+        """Configure CP2K with CMake, enabling the features that match the toolchain and the dependencies"""
+
+        options = self.cmake_features()['options']
+
+        blas_vendors = {
+            toolchain.FLEXIBLAS: 'FlexiBLAS',
+            toolchain.INTELMKL: 'MKL',
+            toolchain.OPENBLAS: 'OpenBLAS',
+        }
+        blas_vendor = blas_vendors.get(self.toolchain.blas_family())
+        if blas_vendor:
+            options['CP2K_BLAS_VENDOR'] = blas_vendor
+
+        self.prepend_config_opts(options)
+
+        return super().configure_step()
+
     def configure_step(self):
         """Configure build
         - build Libint wrapper
         - generate Makefile
         """
+
+        if self.cmake_build:
+            return self.configure_step_cmake()
 
         known_types = ['popt', 'psmp']
         if self.cfg['type'] not in known_types:
@@ -227,6 +446,8 @@ class EB_CP2K(EasyBlock):
                 options['FCFLAGSOPT'] += ' -I%s ' % elpa_inc_dir
             else:
                 options['DFLAGS'] += ' -D__ELPA3'
+
+        options = makefile_hdf5_sirius_options(options, get_software_root('HDF5'), get_software_root('SIRIUS'))
 
         # CUDA
         cuda = get_software_root('CUDA')
@@ -356,7 +577,8 @@ class EB_CP2K(EasyBlock):
             'FCFLAGS': '$(FCFLAGS%s)' % optflags,
             'FCFLAGS2': '$(FCFLAGS%s)' % regflags,
 
-            'CFLAGS': ' %s %s %s $(FPIC) $(DEBUG) %s ' % (cflags, cppflags, ldflags, self.cfg['extracflags']),
+            'CFLAGS': ' $(DFLAGS) %s %s %s $(FPIC) $(DEBUG) %s ' % (
+                cflags, cppflags, ldflags, self.cfg['extracflags']),
             'DFLAGS': ' -D__parallel -D__BLACS -D__SCALAPACK -D__FFTSG %s' % self.cfg['extradflags'],
 
             'LIBS': os.getenv('LIBS', ''),
@@ -556,7 +778,11 @@ class EB_CP2K(EasyBlock):
 
         options['DFLAGS'] += ' -D__GFORTRAN'
 
-        options['FCFLAGSOPT'] += ' $(DFLAGS) $(CFLAGS) -fmax-stack-var-size=32768'
+        options['FCFLAGSOPT'] += ' $(DFLAGS) $(CFLAGS)'
+        if not self.toolchain.options.get('openmp', None):
+            # an explicit -fmax-stack-var-size overrides the -frecursive implied by -fopenmp and puts local
+            # arrays above the limit in static memory shared by all threads, so it is only set without OpenMP
+            options['FCFLAGSOPT'] += ' -fmax-stack-var-size=32768'
         options['FCFLAGSOPT2'] += ' $(DFLAGS) $(CFLAGS)'
 
         gcc_version = get_software_version('GCCcore') or get_software_version('GCC')
@@ -567,6 +793,14 @@ class EB_CP2K(EasyBlock):
             # https://gcc.gnu.org/legacy-ml/gcc-patches/2019-10/msg01861.html
             options['FCFLAGSOPT'] += ' -fallow-argument-mismatch'
             options['FCFLAGSOPT2'] += ' -fallow-argument-mismatch'
+
+        # GCC 15 loop vectorization corrupts integer packing on AVX2 and AVX-512 targets.
+        # The target-specific flag preserves optimization for the other objects.
+        compression_source = os.path.join(self.cfg['start_dir'], 'src', 'hfxbase',
+                                          'hfx_compression_core_methods.F')
+        if (LooseVersion('15.0') <= LooseVersion(gcc_version) < LooseVersion('16.0')
+                and os.path.exists(compression_source)):
+            self.make_instructions += 'hfx_compression_core_methods.o: FCFLAGS += -fno-tree-loop-vectorize\n'
 
         return options
 
@@ -664,6 +898,9 @@ class EB_CP2K(EasyBlock):
         -build_and_install
         """
 
+        if self.cmake_build:
+            return super().build_step()
+
         if LooseVersion(self.version) < LooseVersion('7.0'):
             makefiles = os.path.join(self.cfg['start_dir'], 'makefiles')
             change_dir(makefiles)
@@ -698,8 +935,116 @@ class EB_CP2K(EasyBlock):
         if self.cfg['library']:
             run_shell_cmd(cmd + 'libcp2k')
 
+    def py_regtest_cmd(self, script, num_ranks):
+        """Construct command to run the Python regression test driver of CP2K (do_regtest.py)."""
+
+        with open(script, 'r', encoding='utf-8', errors='replace') as fh:
+            script_txt = fh.read()
+
+        # CP2K 2025.1 and later take the directory with the executables, earlier versions take the arch
+        if 'binary_dir' in script_txt:
+            target = os.path.join(self.cfg['start_dir'], 'exe', self.typearch)
+        else:
+            target = self.typearch
+
+        # None is the easyconfig default; the Makefile path still uses its historical count
+        maxtasks = self.cfg['maxtasks']
+        if maxtasks is None:
+            maxtasks = MAKEFILE_REGTEST_MAXTASKS
+        cmd = ['--mpiranks', str(num_ranks), '--maxtasks', str(maxtasks)]
+        if self.cfg['omp_num_threads']:
+            cmd.extend(['--ompthreads', str(self.cfg['omp_num_threads'])])
+
+        # --mpiexec is a template with {N} for the number of ranks since CP2K 2024.2, earlier versions
+        # append '-n <ranks>' themselves
+        placeholder = '@RANKS@'
+        mpiexec = self.toolchain.mpi_cmd_for('', placeholder).strip()
+        if '{N}' in script_txt:
+            mpiexec = mpiexec.replace(placeholder, '{N}')
+        else:
+            mpiexec = re.sub(r'\s+(-n|-np|--np)\s+' + placeholder, '', mpiexec)
+        if placeholder in mpiexec:
+            raise EasyBuildError("Failed to construct MPI launcher for the regression test from '%s'", mpiexec)
+        cmd.extend(['--mpiexec', quote(mpiexec)])
+        cmd.extend([quote(target), self.cfg['type']])
+
+        return do_regtest_py_cmd(script, cmd)
+
+    def regtest_env_cmd(self):
+        """Command that lets mpiexec start more MPI ranks than there are slots, as the regression tests may"""
+        if self.toolchain.mpi_family() != toolchain.OPENMPI:
+            return ''
+        ompi_ver = get_software_version('OpenMPI')
+        if ompi_ver and LooseVersion(ompi_ver) < LooseVersion('5.0'):
+            return 'export OMPI_MCA_rmaps_base_oversubscribe=1 && '
+        # also when the version is unknown since OpenMPI is not loaded yet (--sanity-check-only): Open MPI 4
+        # ignores this, and EasyBuild sets $OMPI_MCA_rmaps_base_oversubscribe for sanity check commands
+        return 'export PRTE_MCA_rmaps_default_mapping_policy=:oversubscribe && '
+
+    def regtest_cmd(self, cp2k_root, bin_dir, ext, opts):
+        """
+        Command to run CP2K's regression test driver
+
+        :param cp2k_root: directory with tests/do_regtest.py, and with src/grid/sample_tasks for grid_unittest
+        :param bin_dir: directory with the CP2K binaries to test
+        :param ext: suffix of the CP2K binaries (psmp, ssmp, ...)
+        :param opts: extra options for the test driver
+        """
+        # the driver runs at most maxtasks / (MPI ranks * OpenMP threads) inputs at the same time
+        regtest_opts = ['--maxtasks %s' % (self.cfg['maxtasks'] or self.cfg.parallel)]
+        if self.cfg['omp_num_threads']:
+            regtest_opts.append('--ompthreads %s' % self.cfg['omp_num_threads'])
+        regtest_opts.extend(opt for opt in opts if opt)
+
+        # -B: no __pycache__ next to the driver, which may be copied into (or be part of) the installation
+        driver = os.path.join(cp2k_root, 'tests', 'do_regtest.py')
+        return do_regtest_py_cmd(driver, regtest_opts + [bin_dir, ext], python_cmd='python3 -B',
+                                 env_prefix=self.regtest_env_cmd())
+
+    def test_step_cmake(self):
+        """Run CP2K's regression tests with the binaries in the build directory"""
+
+        if not self.cfg['runtest']:
+            return
+
+        features = self.cmake_features()
+        if features['enabled']['CP2K_USE_MPI'] and not build_option('mpi_tests'):
+            self.log.info("Skipping testing of CP2K since MPI testing is disabled")
+            return
+
+        start_dir = self.cfg['start_dir']
+        opts = [
+            '--workbasedir %s' % os.path.join(self.builddir, 'regtesting'),
+            '--cp2kdatadir %s' % os.path.join(start_dir, 'data'),
+            self.cfg['testopts'],
+        ]
+        bin_dir = os.path.join(self.separate_build_dir or start_dir, 'bin')
+        cmd = ' '.join([self.cfg['pretestopts'], self.regtest_cmd(start_dir, bin_dir, features['ext'], opts)])
+        res = run_shell_cmd(cmd, fail_on_error=False)
+
+        summary = parse_regtest_summary(res.output)
+        if summary is None:
+            self.report_test_failure("No summary in the output of CP2K's regression tests (exit code %s)" %
+                                     res.exit_code)
+            return
+
+        msg = ("CP2K regression tests: %(correct)d of %(total)d correct, %(wrong)d wrong, %(failed)d failed, "
+               "%(na)d without result" % summary)
+        # the driver reports status OK only if every test is correct
+        if res.exit_code == 0 and summary['status'] == 'OK':
+            self.log.info(msg)
+        else:
+            self.log.warning("Errors reported by CP2K's regression tests:\n%s", get_regtest_errors(res.output))
+            if self.cfg['ignore_regtest_fails']:
+                print_warning("%s; ignoring this, as requested (ignore_regtest_fails)", msg)
+            else:
+                self.report_test_failure(msg)
+
     def test_step(self):
         """Run regression test."""
+
+        if self.cmake_build:
+            return self.test_step_cmake()
 
         if self.cfg['runtest']:
 
@@ -729,21 +1074,32 @@ class EB_CP2K(EasyBlock):
             # location of do_regtest script
             cfg_fn = 'cp2k_regtest.cfg'
 
+            # CP2K 2023.2 and later ship a Python driver (tools/regtesting/do_regtest.py, moved to
+            # tests/do_regtest.py in CP2K 2024.1) instead of the shell script do_regtest
+            py_regtest_script = None
             regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'regtesting', 'do_regtest')
             regtest_cmd = [regtest_script, '-nobuild', '-config', cfg_fn]
             if LooseVersion(self.version) < LooseVersion('7.1'):
                 # -nosvn option was removed in CP2K 7.1
                 regtest_cmd.insert(1, '-nosvn')
 
-            # older version of CP2K
             if not os.path.exists(regtest_script):
-                regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'do_regtest')
-                regtest_cmd = [regtest_script, '-nocvs', '-quick', '-nocompile', '-config', cfg_fn]
+                # older version of CP2K
+                old_regtest_script = os.path.join(self.cfg['start_dir'], 'tools', 'do_regtest')
+                if os.path.exists(old_regtest_script):
+                    regtest_script = old_regtest_script
+                    regtest_cmd = [regtest_script, '-nocvs', '-quick', '-nocompile', '-config', cfg_fn]
+                else:
+                    for subdir in (('tests',), ('tools', 'regtesting')):
+                        candidate = os.path.join(self.cfg['start_dir'], *(subdir + ('do_regtest.py',)))
+                        if os.path.exists(candidate):
+                            py_regtest_script = candidate
+                            break
 
-            regtest_cmd = ' '.join(regtest_cmd)
-
-            # patch do_regtest so that reference output is used
-            if regtest_refdir:
+            # patch do_regtest so that reference output is used (shell script only)
+            if py_regtest_script:
+                self.log.info("Using Python regression test driver %s", py_regtest_script)
+            elif regtest_refdir:
                 self.log.info("Using reference output available in %s" % regtest_refdir)
                 try:
                     for line in fileinput.input(regtest_script, inplace=1, backup='.orig.refout'):
@@ -762,35 +1118,45 @@ class EB_CP2K(EasyBlock):
             else:
                 self.log.info("Using %s cores for the MPI tests" % test_core_cnt)
 
-            # configure regression test
-            cfg_txt = '\n'.join([
-                'FORT_C_NAME="%(f90)s"',
-                'dir_base=%(base)s',
-                'cp2k_version=%(cp2k_version)s',
-                'dir_triplet=%(triplet)s',
-                'export ARCH=${dir_triplet}',
-                'cp2k_dir=%(cp2k_dir)s',
-                'leakcheck="YES"',
-                'maxtasks=%(maxtasks)s',
-                'cp2k_run_prefix="%(mpicmd_prefix)s"',
-            ]) % {
-                'f90': os.getenv('F90'),
-                'base': os.path.dirname(os.path.normpath(self.cfg['start_dir'])),
-                'cp2k_version': self.cfg['type'],
-                'triplet': self.typearch,
-                'cp2k_dir': os.path.basename(os.path.normpath(self.cfg['start_dir'])),
-                'maxtasks': self.cfg['maxtasks'],
-                'mpicmd_prefix': self.toolchain.mpi_cmd_for('', test_core_cnt),
-            }
+            if py_regtest_script:
+                regtest_cmd = self.py_regtest_cmd(py_regtest_script, test_core_cnt)
+                self.log.debug("Command to run regression test: %s", regtest_cmd)
+            else:
+                # configure regression test
+                cfg_txt = '\n'.join([
+                    'FORT_C_NAME="%(f90)s"',
+                    'dir_base=%(base)s',
+                    'cp2k_version=%(cp2k_version)s',
+                    'dir_triplet=%(triplet)s',
+                    'export ARCH=${dir_triplet}',
+                    'cp2k_dir=%(cp2k_dir)s',
+                    'leakcheck="YES"',
+                    'maxtasks=%(maxtasks)s',
+                    'cp2k_run_prefix="%(mpicmd_prefix)s"',
+                ]) % {
+                    'f90': os.getenv('F90'),
+                    'base': os.path.dirname(os.path.normpath(self.cfg['start_dir'])),
+                    'cp2k_version': self.cfg['type'],
+                    'triplet': self.typearch,
+                    'cp2k_dir': os.path.basename(os.path.normpath(self.cfg['start_dir'])),
+                    'maxtasks': (self.cfg['maxtasks'] if self.cfg['maxtasks'] is not None
+                                 else MAKEFILE_REGTEST_MAXTASKS),
+                    'mpicmd_prefix': self.toolchain.mpi_cmd_for('', test_core_cnt),
+                }
 
-            write_file(cfg_fn, cfg_txt)
-            self.log.debug("Contents of %s: %s" % (cfg_fn, cfg_txt))
+                write_file(cfg_fn, cfg_txt)
+                self.log.debug("Contents of %s: %s" % (cfg_fn, cfg_txt))
+                regtest_cmd = ' '.join(regtest_cmd)
 
             # run regression test
             regtest = run_shell_cmd(regtest_cmd, fail_on_error=False)
 
             if regtest.exit_code == 0:
                 self.log.info("Regression test output:\n%s" % regtest.output)
+            elif py_regtest_script and re.search(r"number\s+of\s+failed\s+tests\s+[0-9]+", regtest.output, re.I):
+                # the Python driver exits with a non-zero code if any test did not pass (including tests that
+                # are not applicable), the summary is evaluated below to decide if that is an error
+                self.log.info("Regression test exited with code %s, output:\n%s", regtest.exit_code, regtest.output)
             else:
                 raise EasyBuildError("Regression test failed (non-zero exit code): %s", regtest.output)
 
@@ -826,9 +1192,8 @@ class EB_CP2K(EasyBlock):
                 logmsg = "Regression test reported %s / %s %s tests"
                 logmsg_values = (cnt, tot_cnt, test_result.lower())
 
-                # failed tests indicate problem with installation
-                # wrong tests are only an issue when there are excessively many
-                if (test_result == "FAILED" and cnt > 0) or (test_result == "WRONG" and (cnt / tot_cnt) > 0.1):
+                # A numerically wrong result is an installation failure at any count.
+                if test_result in ("FAILED", "WRONG") and cnt > 0:
                     if self.cfg['ignore_regtest_fails']:
                         self.log.warning(logmsg, *logmsg_values)
                         self.log.info("Ignoring failures in regression test, as requested.")
@@ -854,12 +1219,24 @@ class EB_CP2K(EasyBlock):
             # number of correct tests: just report
             test_report("CORRECT")
 
+    def install_step_cmake(self):
+        """Install CP2K with CMake, and add what CP2K's regression test driver needs to run on the installation"""
+
+        super().install_step()
+
+        share_dir = os.path.join(self.installdir, 'share', 'cp2k')
+        for subdir in ['tests', os.path.join('src', 'grid', 'sample_tasks')]:
+            copy_dir(os.path.join(self.cfg['start_dir'], subdir), os.path.join(share_dir, subdir))
+
     def install_step(self):
         """Install built CP2K
         - copy from exe to bin
         - copy data dir (if exists)
         - copy tests
         """
+
+        if self.cmake_build:
+            return self.install_step_cmake()
 
         # copy executables
         exedir = os.path.join(self.cfg['start_dir'], 'exe', self.typearch)
@@ -914,8 +1291,67 @@ class EB_CP2K(EasyBlock):
             except (OSError, IOError) as err:
                 raise EasyBuildError("Failed to copy regression test results dir: %s", err)
 
+    def sanity_check_step_cmake(self):
+        """Custom sanity check for CP2K built with CMake"""
+
+        features = self.cmake_features()
+        ext = features['ext']
+        # same precedence as in CMakeMake: CMAKE_INSTALL_LIBDIR in configopts, then install_libdir
+        libdir = (get_cmake_option(self.cfg['configopts'], 'CMAKE_INSTALL_LIBDIR') or self.cfg['install_libdir']
+                  or 'lib')
+        shared_libs = get_cmake_option(self.cfg['configopts'], 'BUILD_SHARED_LIBS')
+        if shared_libs is None:
+            shared_libs = self.cfg['build_shared_libs'] is not False
+        else:
+            shared_libs = is_cmake_true(shared_libs)
+        lib_ext = get_shared_lib_ext() if shared_libs else 'a'
+
+        share_dir = os.path.join('share', 'cp2k')
+        custom_paths = {
+            'files': [os.path.join('bin', 'cp2k.%s' % ext), os.path.join(libdir, 'libcp2k.%s' % lib_ext),
+                      os.path.join(libdir, 'cmake', 'cp2k', 'cp2kConfig.cmake'),
+                      os.path.join('include', 'cp2k', 'libcp2k.h'),
+                      os.path.join(share_dir, 'tests', 'do_regtest.py')],
+            'dirs': [os.path.join(share_dir, 'data'), os.path.join(share_dir, 'src', 'grid', 'sample_tasks')],
+        }
+        # CP2K installs cp2k.popt and cp2k.sopt as symlinks to cp2k.psmp and cp2k.ssmp
+        alias = {'psmp': 'popt', 'ssmp': 'sopt'}.get(ext)
+        if alias:
+            custom_paths['files'].append(os.path.join('bin', 'cp2k.%s' % alias))
+
+        flags = features['flags']
+        if features['enabled']['CP2K_USE_TBLITE'] and LooseVersion(self.version) >= TBLITE_S_DFTD3_VERSION:
+            flags = flags + ['s_dftd3']
+        custom_commands = ["cp2k.%s --version | grep 'cp2kflags:' | grep -w %s" % (ext, flag) for flag in flags]
+
+        extra_modules = None
+        if not self.cfg['sanity_regtest']:
+            self.log.info("Not running CP2K's regression tests in the sanity check, as requested")
+        elif features['enabled']['CP2K_USE_MPI'] and not build_option('mpi_tests'):
+            self.log.info("Not running CP2K's regression tests in the sanity check since MPI testing is disabled")
+        else:
+            # The driver copies tests/ with its permissions and writes into the copy, so it fails on a read-only
+            # installation: run it from a writable copy of tests/ and src/grid/sample_tasks, in the
+            # sanity check's temporary working directory
+            install_share_dir = os.path.join(self.installdir, share_dir)
+            opts = ['--smoketest', '--cp2kdatadir %s' % os.path.join(install_share_dir, 'data')]
+            custom_commands.append(' && '.join([
+                'cp -R %s %s .' % (os.path.join(install_share_dir, 'tests'), os.path.join(install_share_dir, 'src')),
+                'chmod -R u+w tests src',
+                self.regtest_cmd('.', os.path.join(self.installdir, 'bin'), ext, opts),
+            ]))
+            # the driver needs Python, which may only be a build dependency
+            extra_modules = [dep['short_mod_name'] for dep in self.cfg.dependencies(build_only=True)
+                             if dep['name'] == 'Python'] or None
+
+        return super().sanity_check_step(custom_paths=custom_paths, custom_commands=custom_commands,
+                                         extra_modules=extra_modules)
+
     def sanity_check_step(self):
         """Custom sanity check for CP2K"""
+
+        if self.cmake_build:
+            return self.sanity_check_step_cmake()
 
         cp2k_type = self.cfg['type']
         custom_paths = {
@@ -936,7 +1372,10 @@ class EB_CP2K(EasyBlock):
         # also define $CP2K_DATA_DIR in module,
         # even though CP2K was already configured to pick up 'data' from install dir
         # this could be useful for users to access the 'data' dir in a documented way (and it doesn't hurt)
-        datadir = os.path.join(self.installdir, 'data')
+        if self.cmake_build:
+            datadir = os.path.join(self.installdir, 'share', 'cp2k', 'data')
+        else:
+            datadir = os.path.join(self.installdir, 'data')
         if os.path.exists(datadir):
             txt += self.module_generator.set_environment('CP2K_DATA_DIR', datadir)
 
