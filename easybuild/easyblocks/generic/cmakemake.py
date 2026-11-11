@@ -35,6 +35,7 @@ EasyBuild support for software that is configured with CMake, implemented as an 
 """
 import glob
 import re
+import shlex
 import os
 from easybuild.tools import LooseVersion
 
@@ -362,6 +363,8 @@ class CMakeMake(ConfigureMake):
                 if option.endswith('_COMPILER') and self.cfg.get('abs_path_compilers', False):
                     value = which(value)
                     self.log.info("Using absolute path to compiler command: %s", value)
+                if option.endswith('_FLAGS'):
+                    value = shlex.quote(value)
                 options[option] = value
 
         if build_option('rpath') and LooseVersion(self.cmake_version) < LooseVersion('3.5.0'):
