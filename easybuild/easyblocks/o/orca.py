@@ -108,7 +108,8 @@ class EB_ORCA(PackedBinary, MakeCp):
         # Shared executables use $ORIGIN/lib for the vendor runtime libraries.
         libdir = os.path.join(self.installdir, 'lib')
         binlib = os.path.join(self.installdir, 'bin', 'lib')
-        if glob.glob(os.path.join(libdir, 'liborca*')) and not os.path.lexists(binlib):
+        if (os.path.isdir(os.path.dirname(binlib)) and glob.glob(os.path.join(libdir, 'liborca*'))
+                and not os.path.lexists(binlib)):
             symlink(os.path.join(os.pardir, 'lib'), binlib, use_abspath_source=False)
 
     def sanity_check_step(self):
