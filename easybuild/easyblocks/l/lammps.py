@@ -1055,8 +1055,9 @@ class EB_LAMMPS(CMakeMake):
                 kokkos_cleanup = ''
                 if LooseVersion(self.cur_version) >= LooseVersion(translate_lammps_version('22Jul2025')):
                     # Kokkos resources must be released while the CUDA runtime is active.
-                    # The external Python interpreter and mpi4py own their finalization.
-                    kokkos_cleanup = '; l.close(); l.lib.lammps_kokkos_finalize()'
+                    # The external Python interpreter owns its finalization.
+                    kokkos_cleanup = ('; l.close(); l.lib.lammps_kokkos_finalize(); '
+                                      'l.lib.lammps_mpi_finalize(); l.lib.lammps_plugin_finalize()')
                 if self.cuda:
                     if run_gpu_tests:
                         custom_commands.append(
