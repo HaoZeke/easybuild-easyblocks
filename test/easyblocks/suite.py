@@ -53,6 +53,7 @@ import test.easyblocks.test_lammps_example_paths as lammps_paths
 import test.easyblocks.test_lammps_kokkos_cleanup as lammps_cleanup
 import test.easyblocks.test_orca_library_layout as orca_layout
 import test.easyblocks.test_orca_mpi_rpath as orca_mpi
+import test.easyblocks.test_orca_elf_replace_rpath as orca_replace
 
 
 class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
@@ -63,6 +64,7 @@ class EasyBuildEasyBlocksTestSuite(unittest.TestSuite):
         self.addTests(lammps_cleanup.suite(loader))
         self.addTests(orca_layout.suite(loader))
         self.addTests(orca_mpi.suite(loader))
+        self.addTests(orca_replace.suite(loader))
 
     def run(self, *args, **kwargs):
         # initialize logger for all the unit tests

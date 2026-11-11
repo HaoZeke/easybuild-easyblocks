@@ -104,6 +104,53 @@ def orca_elf_interpreter(path):
     return _orca_elf_info(path)[2]
 
 
+def orca_elf_replace_rpath(path, entries, interpreter=None):
+    """Replace RPATH with ordered entries or a transform of the current entries, preserving ELF load safety."""
+    quoted_path = shlex.quote(path)
+    current = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+    original = [entry for entry in current.split(':') if entry]
+    entries = list(entries(original) if callable(entries) else entries)
+    if not entries or any(not isinstance(entry, str) or not entry or ':' in entry or '\0' in entry
+                          for entry in entries):
+        raise EasyBuildError("Invalid replacement RPATH entries in %s", path)
+    dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+    current_interpreter = orca_elf_interpreter(path) if interpreter else None
+    replace_interpreter = current_interpreter is not None and current_interpreter != interpreter
+    if entries == original and '(RPATH)' in dynamic and not replace_interpreter:
+        return
+
+    elf_type, segments = orca_elf_load_info(path)
+    alignments = [align for _, _, align in segments]
+    if not alignments or any(align > ORCA_MAX_LOAD_ALIGNMENT or align & (align - 1) for align in alignments):
+        raise EasyBuildError("Unsupported PT_LOAD alignment in %s: %s", path, alignments)
+    alignment = max(alignments + [1])
+    fixed_address = elf_type == ORCA_ET_EXEC
+    # A large page size can place a fixed-address image's grown string table on page zero.
+    page_size = '--page-size %d ' % alignment if alignment > 0x1000 and not fixed_address else ''
+    interpreter_option = '--set-interpreter %s ' % shlex.quote(interpreter) if replace_interpreter else ''
+    run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s%s" %
+                  (page_size, shlex.quote(':'.join(entries)), interpreter_option, quoted_path), hidden=True)
+    recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
+    if recorded.split(':') != entries:
+        raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
+    dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
+    if '(RPATH)' not in dynamic:
+        raise EasyBuildError("DT_RPATH was not recorded for %s", path)
+    expected_interpreter = interpreter if current_interpreter is not None else None
+    if interpreter and orca_elf_interpreter(path) != expected_interpreter:
+        raise EasyBuildError("ELF interpreter was not preserved in %s: %s", path, expected_interpreter)
+    patched_type, patched_segments = orca_elf_load_info(path)
+    if patched_type != elf_type or not patched_segments:
+        raise EasyBuildError("ELF load structure was not preserved in %s", path)
+    for offset, vaddr, align in patched_segments:
+        if align > 1 and (vaddr - offset) % align:
+            raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
+        if fixed_address and vaddr < ORCA_MIN_LOAD_VADDR:
+            raise EasyBuildError("RPATH rewrite placed a load segment below %#x in %s", ORCA_MIN_LOAD_VADDR, path)
+        if not fixed_address and align < min(alignments):
+            raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
+
+
 def orca_permanent_rpaths(rpath, excluded_roots):
     """Keep unique absolute toolchain paths outside the build and temporary directories."""
     roots = [os.path.realpath(root) for root in excluded_roots if root]
@@ -243,50 +290,14 @@ class EB_ORCA(PackedBinary, MakeCp):
 
     def _append_mpi_rpath(self, path, additions):
         """Preserve vendor search paths and ELF load safety while adding the selected MPI paths."""
-        quoted_path = shlex.quote(path)
-        current = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
-        original = [entry for entry in current.split(':') if entry]
-        entries = list(original)
-        for addition in additions:
-            if addition not in entries:
-                entries.append(addition)
-        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
-        interpreter = getattr(self, '_mpi_interpreter', None)
-        current_interpreter = orca_elf_interpreter(path) if interpreter else None
-        replace_interpreter = current_interpreter is not None and current_interpreter != interpreter
-        if entries == original and '(RPATH)' in dynamic and not replace_interpreter:
-            return
+        def append(original):
+            entries = list(original)
+            for addition in additions:
+                if addition not in entries:
+                    entries.append(addition)
+            return entries
 
-        elf_type, segments = orca_elf_load_info(path)
-        alignments = [align for _, _, align in segments]
-        if not alignments or any(align > ORCA_MAX_LOAD_ALIGNMENT or align & (align - 1) for align in alignments):
-            raise EasyBuildError("Unsupported PT_LOAD alignment in %s: %s", path, alignments)
-        alignment = max(alignments + [1])
-        fixed_address = elf_type == ORCA_ET_EXEC
-        # A large page size can place a fixed-address image's grown string table on page zero.
-        page_size = '--page-size %d ' % alignment if alignment > 0x1000 and not fixed_address else ''
-        interpreter_option = '--set-interpreter %s ' % shlex.quote(interpreter) if replace_interpreter else ''
-        run_shell_cmd("patchelf %s--force-rpath --set-rpath %s %s%s" %
-                      (page_size, shlex.quote(':'.join(entries)), interpreter_option, quoted_path), hidden=True)
-        recorded = run_shell_cmd("patchelf --print-rpath %s" % quoted_path, hidden=True).output.strip()
-        if recorded.split(':') != entries:
-            raise EasyBuildError("RPATH entries were not preserved in %s: %s", path, recorded)
-        dynamic = run_shell_cmd("readelf -d %s" % quoted_path, hidden=True).output
-        if '(RPATH)' not in dynamic:
-            raise EasyBuildError("DT_RPATH was not recorded for %s", path)
-        expected_interpreter = interpreter if current_interpreter is not None else None
-        if interpreter and orca_elf_interpreter(path) != expected_interpreter:
-            raise EasyBuildError("ELF interpreter was not preserved in %s: %s", path, expected_interpreter)
-        patched_type, patched_segments = orca_elf_load_info(path)
-        if patched_type != elf_type or not patched_segments:
-            raise EasyBuildError("ELF load structure was not preserved in %s", path)
-        for offset, vaddr, align in patched_segments:
-            if align > 1 and (vaddr - offset) % align:
-                raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
-            if fixed_address and vaddr < ORCA_MIN_LOAD_VADDR:
-                raise EasyBuildError("RPATH rewrite placed a load segment below %#x in %s", ORCA_MIN_LOAD_VADDR, path)
-            if not fixed_address and align < min(alignments):
-                raise EasyBuildError("PT_LOAD alignment was not preserved in %s", path)
+        orca_elf_replace_rpath(path, append, getattr(self, '_mpi_interpreter', None))
 
     def post_processing_step(self):
         """Give precompiled MPI consumers the permanent RPATH of the selected toolchain."""
