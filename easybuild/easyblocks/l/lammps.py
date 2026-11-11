@@ -375,6 +375,38 @@ def lammps_example_input(installdir, check_file, dry_run=False):
     raise EasyBuildError("Could not find installed LAMMPS sanity input for %s", check_file)
 
 
+def copy_lammps_examples(source, destination, dirs_exist_ok=False):
+    """Merge examples while preserving source links and refusing linked directories."""
+    if build_option('extended_dry_run') or not dirs_exist_ok or not os.path.lexists(destination):
+        copy_dir(source, destination, symlinks=True, dirs_exist_ok=dirs_exist_ok)
+        return
+
+    if os.path.islink(destination) or not os.path.isdir(destination):
+        raise EasyBuildError("LAMMPS examples destination must be a real directory: %s", destination)
+
+    for name in os.listdir(source):
+        source_entry = os.path.join(source, name)
+        destination_entry = os.path.join(destination, name)
+        if os.path.islink(source_entry):
+            link = os.readlink(source_entry)
+            if os.path.islink(destination_entry) and os.readlink(destination_entry) == link:
+                continue
+            if os.path.lexists(destination_entry):
+                if os.path.isdir(destination_entry) and not os.path.islink(destination_entry):
+                    raise EasyBuildError("Cannot replace examples directory with a symbolic link: %s",
+                                         destination_entry)
+                os.unlink(destination_entry)
+            os.symlink(link, destination_entry)
+        elif os.path.isdir(source_entry):
+            copy_lammps_examples(source_entry, destination_entry, dirs_exist_ok=True)
+        else:
+            if os.path.islink(destination_entry):
+                os.unlink(destination_entry)
+            elif os.path.isdir(destination_entry):
+                raise EasyBuildError("Cannot replace examples directory with a file: %s", destination_entry)
+            copy_file(source_entry, destination_entry)
+
+
 class EB_LAMMPS(CMakeMake):
     """
     Support for building and installing LAMMPS
@@ -935,8 +967,8 @@ class EB_LAMMPS(CMakeMake):
         # Copy over the examples so we can repeat the sanity check
         # (some symlinks may be broken)
         examples_dir = os.path.join(self.start_dir, 'examples')
-        copy_dir(examples_dir, os.path.join(self.installdir, 'examples'), symlinks=True,
-                 dirs_exist_ok=self.cfg['keeppreviousinstall'])
+        copy_lammps_examples(examples_dir, os.path.join(self.installdir, 'examples'),
+                             dirs_exist_ok=self.cfg['keeppreviousinstall'])
         potentials_dir = os.path.join(self.start_dir, 'potentials')
         copy_dir(potentials_dir, os.path.join(self.installdir, 'potentials'),
                  dirs_exist_ok=self.cfg['keeppreviousinstall'])
