@@ -85,7 +85,6 @@ install(TARGETS lmp RUNTIME DESTINATION bin)
         self.assertEqual((self.stale / 'liblammps.so.0').read_bytes(), stale_bytes)
         self.assertEqual(normalize_lammps_test_rpaths(str(self.build), str(self.root / 'installed')), [])
 
-
     def test_rpath_tag_and_permanent_entries_are_preserved(self):
         subprocess.check_call(['patchelf', '--force-rpath', '--set-rpath', str(self.stale),
                                str(self.executable)])
