@@ -30,6 +30,7 @@ environment flags for the current toolchain
 """
 import glob
 import os
+import re
 import stat
 
 from easybuild.easyblocks.generic.bundle import Bundle
@@ -74,6 +75,47 @@ class BuildEnv(Bundle):
 
         super().prepare_step(*args, **kwargs)
 
+    def _check_retained_rpath_wrappers(self, source, destination):
+        """Require a safe retained wrapper tree identical to the installed candidate."""
+        python_executable = self.cfg['python_executable']
+        if python_executable is not None and (not isinstance(python_executable, str) or not python_executable):
+            raise EasyBuildError(f"python_executable should be None or non-empty string, got {python_executable}")
+
+        def inventory(root, normalize):
+            entries = {}
+            for current, directories, files in os.walk(root, followlinks=False):
+                for path in [current] + [os.path.join(current, name) for name in directories + files]:
+                    relative = os.path.relpath(path, root)
+                    metadata = os.lstat(path)
+                    mode = metadata.st_mode
+                    safe_type = stat.S_ISDIR(mode) or stat.S_ISREG(mode)
+                    unsafe_mode = mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+                    missing_access = not normalize and mode & 0o555 != 0o555
+                    if not safe_type or metadata.st_uid != os.getuid() or unsafe_mode or missing_access:
+                        raise EasyBuildError("Unsafe retained wrapper metadata: %s", path)
+                    if stat.S_ISREG(mode):
+                        if metadata.st_nlink != 1:
+                            raise EasyBuildError("Retained wrapper has multiple hard links: %s", path)
+                        with open(path, 'rb') as stream:
+                            data = stream.read()
+                        if normalize and python_executable is not None and len(relative.split(os.sep)) == 2:
+                            data = re.sub(rb'^PYTHON_EXE=.*$', b'PYTHON_EXE=' + python_executable.encode(),
+                                          data, flags=re.MULTILINE)
+                        entries[relative] = ('file', data)
+                    else:
+                        entries[relative] = ('directory', None)
+            return entries
+
+        if os.path.islink(source) or os.path.islink(destination):
+            raise EasyBuildError("Retained wrapper root must be a real directory")
+        install_root = os.path.realpath(self.installdir)
+        if os.path.commonpath([install_root, os.path.realpath(destination)]) != install_root:
+            raise EasyBuildError("Retained wrappers must remain inside the installation directory")
+        candidate = inventory(source, normalize=True)
+        retained = inventory(destination, normalize=False)
+        if not candidate or candidate != retained:
+            raise EasyBuildError("Retained RPATH wrappers differ from the installation candidate")
+
     def install_step(self, *args, **kwargs):
         """
         Custom install step for buildenv: copy RPATH wrapper scripts to install dir (if they exist)
@@ -85,6 +127,9 @@ class BuildEnv(Bundle):
         if os.path.exists(wrappers_dir):
             self.rpath_wrappers_dir = os.path.join(self.installdir, 'bin')
             rpath_wrappers_path = os.path.join(self.rpath_wrappers_dir, RPATH_WRAPPERS_SUBDIR)
+            if self.cfg['keeppreviousinstall'] and os.path.lexists(rpath_wrappers_path):
+                self._check_retained_rpath_wrappers(wrappers_dir, rpath_wrappers_path)
+                return
             copy_dir(wrappers_dir, rpath_wrappers_path)
             py_exe = self.cfg['python_executable']
             if py_exe is not None:
