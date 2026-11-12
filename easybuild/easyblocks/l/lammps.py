@@ -1006,7 +1006,7 @@ class EB_LAMMPS(CMakeMake):
             self.log.info(msg)
 
         linker_flags = det_lammps_exe_linker_flags(self.cfg['configopts'], rpath_link_dirs,
-                                                  default_flags=os.environ.get('LDFLAGS', ''))
+                                                 default_flags=os.environ.get('LDFLAGS', ''))
         if linker_flags:
             self.cfg.update('configopts', linker_flags)
 
