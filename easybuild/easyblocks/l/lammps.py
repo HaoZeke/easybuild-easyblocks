@@ -1051,7 +1051,7 @@ class EB_LAMMPS(CMakeMake):
                    -l %(builddir)s/liblammps.so \
                    -v %(lammpsdir)s/src/version.h -w %(builddir)s -i %(site_packages)s' % {
                 'python_dir': self.python_dir,
-                'builddir': getattr(self, 'separate_build_dir', None) or os.path.join(self.builddir, 'easybuild_obj'),
+                'builddir': getattr(self, 'separate_build_dir', None) or self.start_dir,
                 'lammpsdir': self.lammpsdir,
                 'site_packages': site_packages,
             }
@@ -1065,7 +1065,7 @@ class EB_LAMMPS(CMakeMake):
         # so geturl/libcurl TLS checks during tests use the public trust store.
         ensure_lammps_curl_ca_bundle()
         if self.cfg.get('runtest') or self.cfg.get('test_cmd'):
-            test_builddir = self.separate_build_dir or os.path.join(self.builddir, 'easybuild_obj')
+            test_builddir = self.separate_build_dir or self.start_dir
             normalize_lammps_test_rpaths(test_builddir, self.installdir)
 
         # add flags to test_cmd to ignore some tests
