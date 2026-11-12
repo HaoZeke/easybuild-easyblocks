@@ -1048,10 +1048,10 @@ class EB_LAMMPS(CMakeMake):
             # This patch is necessary because the current lammps only allows
             # the lammps python package to be installed system-wide or in user site-packages
             cmd = 'python %(python_dir)s/install.py -p %(python_dir)s/lammps \
-                   -l %(builddir)s/easybuild_obj/liblammps.so \
-                   -v %(lammpsdir)s/src/version.h -w %(builddir)s/easybuild_obj -i %(site_packages)s' % {
+                   -l %(builddir)s/liblammps.so \
+                   -v %(lammpsdir)s/src/version.h -w %(builddir)s -i %(site_packages)s' % {
                 'python_dir': self.python_dir,
-                'builddir': os.path.dirname(self.separate_build_dir) if self.separate_build_dir else self.builddir,
+                'builddir': getattr(self, 'separate_build_dir', None) or os.path.join(self.builddir, 'easybuild_obj'),
                 'lammpsdir': self.lammpsdir,
                 'site_packages': site_packages,
             }
