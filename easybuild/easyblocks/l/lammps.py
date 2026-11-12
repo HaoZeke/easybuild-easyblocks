@@ -31,6 +31,8 @@
 """
 
 import glob
+import json
+import subprocess
 import os
 import re
 import shlex
@@ -71,6 +73,62 @@ HOST_CA_BUNDLE_CANDIDATES = (
     '/etc/pki/tls/cacert.pem',
     '/etc/ssl/cert.pem',
 )
+
+
+def normalize_lammps_test_rpaths(builddir, installdir):
+    """Select fresh LAMMPS libraries for registered build-tree test executables."""
+    builddir = os.path.realpath(builddir)
+    installdir = os.path.realpath(installdir)
+    listing = subprocess.check_output(['ctest', '--show-only=json-v1'], cwd=builddir, text=True)
+    tests = json.loads(listing)['tests']
+    installed_sources = set()
+    for directory, _, files in os.walk(builddir):
+        if 'cmake_install.cmake' not in files:
+            continue
+        script = read_file(os.path.join(directory, 'cmake_install.cmake'))
+        for install in re.findall(r'file\(\s*INSTALL\b(.*?)\)', script, flags=re.S | re.I):
+            if re.search(r'\bTYPE\s+(EXECUTABLE|SHARED_LIBRARY|MODULE)\b', install):
+                installed_sources.update(os.path.realpath(path) for path in re.findall(r'"([^"]+)"', install)
+                                         if os.path.isabs(path) and os.path.isfile(path))
+    changed = []
+    for executable in sorted({test['command'][0] for test in tests if test.get('command')}):
+        executable = os.path.realpath(os.path.join(builddir, executable))
+        if (os.path.commonpath([builddir, executable]) != builddir or
+                os.path.commonpath([installdir, executable]) == installdir or
+                executable in installed_sources or not os.path.isfile(executable)):
+            continue
+        with open(executable, 'rb') as stream:
+            if stream.read(4) != b'\x7fELF':
+                continue
+        needed = subprocess.check_output(['patchelf', '--print-needed', executable], text=True).splitlines()
+        libraries = [name for name in needed if name.startswith('liblammps.so')]
+        if not libraries:
+            continue
+        relative_dirs = []
+        for name in libraries:
+            candidates = [os.path.join(builddir, name), os.path.join(builddir, 'lib', name),
+                          os.path.join(builddir, 'lib64', name)]
+            library = next((path for path in candidates if os.path.isfile(path) and
+                            os.path.commonpath([builddir, os.path.realpath(path)]) == builddir), None)
+            if library is None:
+                raise EasyBuildError("No fresh build-tree library for %s: %s", executable, name)
+            relative = os.path.relpath(os.path.dirname(library), os.path.dirname(executable))
+            origin = '$ORIGIN' if relative == '.' else '$ORIGIN/' + relative
+            if origin not in relative_dirs:
+                relative_dirs.append(origin)
+        old = subprocess.check_output(['patchelf', '--print-rpath', executable], text=True).rstrip('\n')
+        entries = relative_dirs + [entry for entry in old.split(':') if entry and entry not in relative_dirs]
+        new = ':'.join(entries)
+        if new != old:
+            if os.stat(executable).st_nlink != 1:
+                raise EasyBuildError("Test executable has shared storage: %s", executable)
+            dynamic = subprocess.check_output(['readelf', '-d', executable], text=True)
+            argv = ['patchelf']
+            if '(RPATH)' in dynamic:
+                argv.append('--force-rpath')
+            subprocess.check_call(argv + ['--set-rpath', new, executable])
+            changed.append(executable)
+    return changed
 
 
 def _nonempty_env_value(environ, name):
@@ -1006,6 +1064,8 @@ class EB_LAMMPS(CMakeMake):
         # Provide a host-trusted CAfile when the caller has not chosen CURL_CA_BUNDLE,
         # so geturl/libcurl TLS checks during tests use the public trust store.
         ensure_lammps_curl_ca_bundle()
+        if self.cfg.get('runtest') or self.cfg.get('test_cmd'):
+            normalize_lammps_test_rpaths(os.path.join(self.builddir, 'easybuild_obj'), self.installdir)
 
         # add flags to test_cmd to ignore some tests
         if self.cfg.get('runtest') is True and not self.cfg.get('test_cmd'):
