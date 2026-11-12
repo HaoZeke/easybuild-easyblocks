@@ -85,6 +85,35 @@ install(TARGETS lmp RUNTIME DESTINATION bin)
         self.assertEqual((self.stale / 'liblammps.so.0').read_bytes(), stale_bytes)
         self.assertEqual(normalize_lammps_test_rpaths(str(self.build), str(self.root / 'installed')), [])
 
+
+    def test_rpath_tag_and_permanent_entries_are_preserved(self):
+        subprocess.check_call(['patchelf', '--force-rpath', '--set-rpath', str(self.stale),
+                               str(self.executable)])
+        normalize_lammps_test_rpaths(str(self.build), str(self.root / 'installed'))
+        dynamic = subprocess.check_output(['readelf', '-d', str(self.executable)], text=True)
+        self.assertIn('(RPATH)', dynamic)
+        self.assertNotIn('(RUNPATH)', dynamic)
+        self.assertEqual(subprocess.call([str(self.executable)]), 0)
+        self.assertEqual(subprocess.check_output(['patchelf', '--print-rpath', str(self.executable)], text=True),
+                         '$ORIGIN/..:' + str(self.stale) + '\n')
+
+    def test_test_stage_uses_the_configured_object_directory(self):
+        from unittest import mock
+        from easybuild.easyblocks.generic.cmakemake import CMakeMake
+        from easybuild.easyblocks.l.lammps import EB_LAMMPS
+
+        block = object.__new__(EB_LAMMPS)
+        block.cfg = {'runtest': True, 'test_cmd': 'ctest'}
+        block.builddir = str(self.root / 'control')
+        block.separate_build_dir = str(self.build)
+        block.installdir = str(self.root / 'installed')
+        with mock.patch('easybuild.easyblocks.l.lammps.ensure_lammps_curl_ca_bundle'), \
+                mock.patch('easybuild.easyblocks.l.lammps.normalize_lammps_test_rpaths') as normalize, \
+                mock.patch.object(CMakeMake, 'test_step') as base:
+            block.test_step()
+        normalize.assert_called_once_with(str(self.build), str(self.root / 'installed'))
+        base.assert_called_once_with()
+
     def test_shared_inode_is_refused_without_modification(self):
         backup = self.root / 'shared-elf'
         os.link(self.executable, backup)
