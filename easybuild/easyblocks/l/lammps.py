@@ -301,7 +301,7 @@ def translate_lammps_version(version, path=None):
             raise ValueError(f"LAMMPS version {version} cannot be translated")
 
 
-def get_ld_preload_value_cuda_stubs():
+def get_ld_preload_value_cuda_stubs(cuda_root=None):
     """
     Determine value for $LD_PRELOAD that includes CUDA stub libraries
     """
@@ -318,7 +318,10 @@ def get_ld_preload_value_cuda_stubs():
     # check if CUDA stubs library is already included, to avoid doing so twice
     if not any(x.endswith(cuda_stub_libs[0]) for x in ld_preload):
 
-        cuda_root = get_software_root('CUDA')
+        if cuda_root is None:
+            cuda_root = get_software_root('CUDA')
+        if not cuda_root:
+            raise EasyBuildError("CUDA installation root is unavailable for stub library checks")
         cuda_stub_lib_paths = [os.path.join(cuda_root, x) for x in cuda_stub_libs]
 
         # make sure these paths exist before we shove them into $LD_PRELOAD
@@ -649,6 +652,9 @@ class EB_LAMMPS(CMakeMake):
     def prepare_step(self, *args, **kwargs):
         """Custom prepare step for LAMMPS."""
         self._prepare_curl_rpath(*args, **kwargs)
+
+        # Build-only CUDA dependencies are absent from the runtime module environment.
+        self.cuda_root = get_software_root('CUDA') if self.cuda else None
 
         # version 1.3.2 is used in the test suite to check easyblock can be initialised
         if self.version != '1.3.2':
@@ -1200,7 +1206,7 @@ class EB_LAMMPS(CMakeMake):
         # During testing I found that $LD_PRELOAD was not picked up in the environment.
         # It has to be explicitly set in the command.
         if self.cuda and not self.nvidia_gpu_found:
-            ld_preload = get_ld_preload_value_cuda_stubs()
+            ld_preload = get_ld_preload_value_cuda_stubs(cuda_root=getattr(self, 'cuda_root', None))
             custom_commands = [f'LD_PRELOAD="{ld_preload}" {cmd}' for cmd in custom_commands]
 
         custom_commands = [f"cd {execution_dir} && {cmd}" for cmd in custom_commands]
