@@ -1202,16 +1202,19 @@ class EB_LAMMPS(CMakeMake):
             self.log.info("Using %s cores for the MPI tests" % test_core_cnt)
             custom_commands = [self.toolchain.mpi_cmd_for(cmd, test_core_cnt) for cmd in custom_commands]
 
-        # When crosscompiling LAMMPS with CUDA the build and testing require $LD_PRELOAD being set.
-        # During testing I found that $LD_PRELOAD was not picked up in the environment.
-        # It has to be explicitly set in the command.
+        openmpi_ver = get_software_version('OpenMPI')
+
+        # CPU-only CUDA checks require stub libraries in each sanity command.
         if self.cuda and not self.nvidia_gpu_found:
             ld_preload = get_ld_preload_value_cuda_stubs(cuda_root=getattr(self, 'cuda_root', None))
-            custom_commands = [f'LD_PRELOAD="{ld_preload}" {cmd}' for cmd in custom_commands]
+            command_env = f'LD_PRELOAD="{ld_preload}"'
+            if openmpi_ver and LooseVersion(openmpi_ver) >= '5.0':
+                # CUDA stubs cannot classify host buffers for the OpenMPI accelerator component.
+                command_env += ' OMPI_MCA_accelerator=null'
+            custom_commands = [f'{command_env} {cmd}' for cmd in custom_commands]
 
         custom_commands = [f"cd {execution_dir} && {cmd}" for cmd in custom_commands]
 
-        openmpi_ver = get_software_version('OpenMPI')
         if openmpi_ver:
             if LooseVersion(openmpi_ver) >= '5.0':
                 set_env_var_cmd = "export PRTE_MCA_rmaps_default_mapping_policy=':oversubscribe'"
