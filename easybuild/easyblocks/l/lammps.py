@@ -1140,7 +1140,8 @@ class EB_LAMMPS(CMakeMake):
             elif os.environ.get('CUDA_VISIBLE_DEVICES') == '-1':
                 print_warning('GPUs explicitely disabled via CUDA_VISIBLE_DEVICES. Skipping GPU tests!')
             else:
-                run_gpu_tests = True
+                # The CUDA toolkit can provide nvidia-smi on a host without an NVIDIA GPU.
+                run_gpu_tests = self.nvidia_gpu_found
 
         # add accelerator-specific tests
         # INTEL package - it requires mpi4py - run only for updated easyconfigs >= 29Aug2024
