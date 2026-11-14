@@ -747,7 +747,7 @@ class EB_LAMMPS(CMakeMake):
             shock_examples_path = os.path.join(self.installdir, "examples", "PACKAGES", "shock")
             msst_test_path = os.path.join(shock_examples_path, "msst", "in.msst")
             sanity_check_test_inputs_shock = [
-                os.path.join(shock_examples_path, "hugonoistat", "in.hugoniostat"),
+                os.path.join(shock_examples_path, "hugoniostat", "in.hugoniostat"),
                 msst_test_path,
             ]
             test_paths = test_paths + sanity_check_test_inputs_shock
