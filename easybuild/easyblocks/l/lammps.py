@@ -46,7 +46,8 @@ from easybuild.easyblocks.kokkos import KOKKOS_LEGACY_ARCH_MAPPING, KOKKOS_CPU_M
 from easybuild.framework.easyconfig import CUSTOM, MANDATORY
 from easybuild.tools.build_log import EasyBuildError, print_warning, print_msg
 from easybuild.tools.config import build_option, IGNORE
-from easybuild.tools.filetools import apply_regex_substitutions, copy_dir, copy_file, mkdir, read_file, which
+from easybuild.tools.filetools import apply_regex_substitutions, copy_dir, copy_file, mkdir, read_file, remove_file
+from easybuild.tools.filetools import symlink, which
 from easybuild.tools.modules import get_software_root, get_software_version
 from easybuild.tools.run import run_shell_cmd
 from easybuild.tools.systemtools import AARCH64
@@ -714,7 +715,23 @@ class EB_LAMMPS(CMakeMake):
                 else:
                     env.setvar('OMPI_MCA_rmaps_base_oversubscribe', '1')
 
-        super().test_step()
+        # Python tests import lammps from the source tree, where core.py loads
+        # liblammps.so by bare name. When CDLL calls find_library first, every
+        # lammps() instance pays for ldconfig/gcc/ld. A library next to core.py
+        # makes that load an absolute path.
+        lammps_lib = 'liblammps.' + get_shared_lib_ext()
+        built_lib = os.path.join(self.builddir, 'easybuild_obj', lammps_lib)
+        python_pkg_lib = os.path.join(self.start_dir, 'python', 'lammps', lammps_lib)
+        link_lib = (os.path.isfile(built_lib) and os.path.isdir(os.path.dirname(python_pkg_lib))
+                    and not os.path.lexists(python_pkg_lib))
+        if link_lib:
+            symlink(built_lib, python_pkg_lib)
+        try:
+            super().test_step()
+        finally:
+            # install_step builds the Python package from the same directory, with the library passed explicitly
+            if link_lib:
+                remove_file(python_pkg_lib)
 
     def sanity_check_step(self, *args, **kwargs):
         """Run custom sanity checks for LAMMPS files, dirs and commands."""
